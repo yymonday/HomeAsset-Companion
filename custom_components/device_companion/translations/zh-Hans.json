@@ -1,0 +1,65 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "添加陪伴记录 (1/3 基础档案)",
+        "data": {
+          "device_name": "名称 (如: Netflix / 我们的婚戒)",
+          "category": "资产分类",
+          "purchase_date": "起算/购入日期",
+          "total_price": "单期造价 / 总价值",
+          "device_image": "主图 URL (可选)"
+        }
+      },
+      "device_features": {
+        "title": "硬件专属特性 (2/3)",
+        "description": "检测到您添加的是实体物品，请补充以下特性：",
+        "data": {
+          "has_installment": "是否有分期付款？",
+          "has_consumable": "是否有持续损耗的耗材滤芯？(对戒/配件请在创建后添加)"
+        }
+      },
+      "service_step": { 
+        "title": "虚拟服务订阅周期 (2/3)", 
+        "data": { "sub_period": "续费周期 (系统将自动推算到期日)", "expiration_date": "自定义到期时间 (仅限自定义模式)" } 
+      },
+      "installment_step": { "title": "分期付款配置 (3/3)", "data": { "installment_months": "分期月数", "installment_interest": "分期总利息" } },
+      "consumable_step": { "title": "首个耗材配置 (3/3)", "data": { "consumable_name": "名称", "tracking_mode": "模式", "linked_entity": "关联实体", "consumable_price": "价格", "consumable_cycle": "周期", "consumable_start_date": "起始日", "consumable_image": "图片" } }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "档案馆管控中心",
+        "menu_options": { "edit_basic": "✏️ 修改基础/订阅/纪念属性", "manage_acc_select": "⌨️ 管理专属配件", "manage_perk_select": "🎁 管理附加权益 (赠送会员)", "manage_mem_select": "💍 管理套件/对戒单品", "edit_consumable_select": "📝 修改/删除 耗材", "manage_consumable": "➕ 添加 新耗材", "manage_lifecycle": "📦 主体状态流转 (退役/遗失)" }
+      },
+      "edit_basic": {
+        "title": "资料库修改",
+        "data": {
+          "device_name": "名称", "category": "更改分类", "total_price": "更新价值/单期价格", "purchase_date": "更新起始日期",
+          "sub_period": "🔄 订阅续费周期 (仅服务)", "expiration_date": "📅 手动覆盖到期日 (仅服务)", 
+          "story": "💌 背后故事 (仅纪念品)", "location": "📍 存放位置 (仅纪念品)", "is_wearing": "✨ 正在佩戴中 (仅纪念品)", "linked_price_entity": "📈 关联实时金价实体 (填 sensor.xxx)",
+          "is_installment": "是否有分期？", "installment_months": "分期月数", "installment_interest": "利息", "early_payoff": "✅ 提前结清", "early_payoff_fee": "违约金"
+        }
+      },
+      "manage_acc_select": { "title": "数码/家电 配件库", "data": { "selected_item": "选择配件" } },
+      "manage_acc_add": { "title": "录入新配件", "data": { "name": "配件名称", "price": "购入价格(元)", "purchase_date": "购入日期", "is_installment": "是否有分期？", "installment_months": "分期月数", "installment_interest": "分期利息", "image": "图片URL" } },
+      "manage_acc_edit": { "title": "配件管理", "data": { "name": "配件名称", "price": "购入价格(元)", "purchase_date": "购入日期", "is_installment": "是否有分期？", "installment_months": "分期月数", "installment_interest": "分期利息", "early_payoff": "✅ 提前结清", "early_payoff_fee": "违约金", "is_retired": "🚨 勾选以确认退役/遗失", "retirement_reason": "当前状态 / 流转去向", "recovery_amount": "回血(元)", "delete_this": "🚨 彻底删档" } },
+      
+      "manage_perk_select": { "title": "附加会员权益库", "data": { "selected_item": "选择权益" } },
+      "manage_perk_add": { "title": "录入新权益 (如赠送会员)", "data": { "name": "权益名称 (如:优酷VIP)", "price": "标称价值(元，算入白嫖总额)", "purchase_date": "起算日期", "expiration_date": "📅 权益到期日 (留空同主件)", "image": "图标URL" } },
+      "manage_perk_edit": { "title": "附加权益管理", "data": { "name": "权益名称", "price": "标称价值(元)", "purchase_date": "起算日期", "expiration_date": "📅 权益到期日", "is_retired": "🚨 勾选以确认失效", "retirement_reason": "当前状态", "delete_this": "🚨 彻底删档" } },
+      
+      "manage_mem_select": { "title": "纪念套件/对戒库", "data": { "selected_item": "选择单品" } },
+      "manage_mem_add": { "title": "录入纪念单品 (如男戒/女戒)", "data": { "name": "单品名称", "price": "价值(元)", "purchase_date": "纪念日/购入日", "is_wearing": "✨ 正在随身佩戴", "image": "图片URL" } },
+      "manage_mem_edit": { "title": "纪念单品管理", "data": { "name": "单品名称", "price": "价值(元)", "purchase_date": "纪念日/购入日", "is_wearing": "✨ 正在随身佩戴", "is_retired": "🚨 勾选以确认封存/遗失", "retirement_reason": "当前状态 / 流转去向", "recovery_amount": "回血(元)", "delete_this": "🚨 彻底删档" } },
+
+      "edit_consumable_select": { "title": "选择修改耗材", "data": { "selected_consumable": "选择耗材" } },
+      "edit_consumable_form": { "title": "编辑耗材", "data": { "edit_name": "名称", "tracking_mode": "模式", "linked_entity": "关联实体", "edit_price": "价格", "edit_cycle": "周期(智能模式填0)", "edit_start_date": "更换日期", "edit_image": "图片", "delete_this": "🚨 彻底删除" } },
+      "manage_consumable": { "title": "添加新耗材", "data": { "new_name": "名称", "tracking_mode": "模式", "linked_entity": "关联实体(可选)", "new_price": "价格", "new_cycle": "周期(智能模式填0)", "new_start_date": "更换日期", "new_image": "图片" } },
+      "manage_lifecycle": { "title": "主体生命周期流转", "data": { "is_retired": "🚨 勾选以确认退役/遗失", "retirement_reason": "当前状态 / 流转去向" } },
+      "lifecycle_sub": { "title": "流转细节", "data": { "recovery_amount": "二手回血(元)" } }
+    },
+    "abort": { "no_consumables": "❌ 没有配置任何数据！" }
+  }
+}

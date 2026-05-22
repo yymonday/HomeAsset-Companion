@@ -1,0 +1,10 @@
+{
+  "domain": "device_companion",
+  "name": "HomeAsset Companion(资产与陪伴管家)",
+  "codeowners": ["@yymonday"],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://github.com/yymonday/HomeAsset-Companion",
+  "iot_class": "local_push",
+  "version": "1.0.0"
+}
