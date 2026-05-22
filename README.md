@@ -19,7 +19,9 @@
 ---
 
 ## 📸 界面预览 (Screenshots)
-*(建议在此处上传 2-3 张截图：一张大盘统计卡片，一张单品详情卡片，一张添加向导的截图)*
+<img width="1076" height="1184" alt="image" src="https://github.com/user-attachments/assets/bb8ced56-d948-4fbc-9d13-1f4b2a2ec54a" />
+<img width="1051" height="1194" alt="0e7d1df78b936dc1dfbac7d02978f652" src="https://github.com/user-attachments/assets/8591079d-e53c-4cde-a2c5-65ee9f368527" />
+
 
 ---
 
