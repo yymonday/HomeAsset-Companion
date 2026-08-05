@@ -1,0 +1,130 @@
+renew_service:
+  name: 续订服务
+  description: 为虚拟服务增加一期费用并延长到期日。
+  fields:
+    entity_id:
+      name: 陪伴实体
+      description: HomeAsset Companion 主传感器实体。
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    cost:
+      name: 本次费用
+      description: 留空时使用该服务当前设置的单期费用。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 0.01
+          mode: box
+          unit_of_measurement: 元
+    months:
+      name: 延长月数
+      description: 留空时按原订阅周期延长。
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 120
+          step: 1
+          mode: box
+    expiration_date:
+      name: 新到期日
+      description: 设置后优先使用此日期，不再按月份自动推算。
+      required: false
+      selector:
+        date:
+
+replace_consumable:
+  name: 确认更换耗材
+  description: 记录耗材更换日期和本次实际费用。
+  fields:
+    entity_id:
+      name: 陪伴实体
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    cons_id:
+      name: 耗材 ID
+      required: true
+      selector:
+        text:
+    cost:
+      name: 本次费用
+      description: 留空时使用耗材默认价格。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 0.01
+          mode: box
+          unit_of_measurement: 元
+
+set_lifecycle:
+  name: 设置生命周期状态
+  description: 修改主体状态；终止类状态会冻结陪伴天数与当前运行成本。
+  fields:
+    entity_id:
+      name: 陪伴实体
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    status:
+      name: 状态
+      required: true
+      selector:
+        select:
+          options:
+            - label: 正常使用
+              value: active
+            - label: 闲置持有
+              value: idle
+            - label: 已封存
+              value: archived
+            - label: 二手售出
+              value: sold
+            - label: 已报废
+              value: scrapped
+            - label: 已遗失
+              value: lost
+            - label: 已赠出
+              value: gifted
+            - label: 已取消
+              value: canceled
+    recovery_amount:
+      name: 回收金额
+      description: 仅在二手售出状态下计入。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 0.01
+          mode: box
+          unit_of_measurement: 元
+
+update_item_image:
+  name: 更新附属项目图片
+  description: 更新耗材、配件、纪念单品或附加权益的图片地址。
+  fields:
+    entity_id:
+      name: 陪伴实体
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    item_id:
+      name: 项目 ID
+      required: true
+      selector:
+        text:
+    image_url:
+      name: 图片地址
+      required: true
+      selector:
+        text:

@@ -1,5 +1,5 @@
 {
-  "name": "HomeAsset Companion资产与陪伴管家",
+  "name": "HomeAsset Companion",
   "render_readme": true,
-  "filename": "device_companion"
+  "homeassistant": "2026.6.0"
 }
