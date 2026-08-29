@@ -23,7 +23,9 @@ from .const import (
     CONF_ACCESSORIES_LIST,
     CONF_AUTO_RECORD_REPLACEMENT,
     CONF_CONSUMABLES_LIST,
+    CONF_CURRENT_PERIOD_COST,
     CONF_EXPIRATION_DATE,
+    CONF_KIND,
     CONF_RECOVERY_AMOUNT,
     CONF_SCHEMA_VERSION,
     CONF_STATUS,
@@ -54,6 +56,8 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.CALENDAR]
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 ALLOWED_STATUS_VALUES = list(STATUS_LABELS)
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 SERVICE_RENEW = "renew_service"
 SERVICE_REPLACE = "replace_consumable"
@@ -166,6 +170,11 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             period_start = add_months_to_date(expiration, -months) if months else safe_date(data.get("purchase_date"), expiration)
             options.setdefault("service_period_start", str(period_start))
             options.setdefault("service_period_days", max(1, (expiration - period_start).days))
+    if data[CONF_KIND] == KIND_SERVICE:
+        options.setdefault(
+            CONF_CURRENT_PERIOD_COST,
+            max(0.0, safe_float(data.get(CONF_TOTAL_PRICE))),
+        )
 
     main_status = legacy_status(options)
     options = normalize_status_record(
@@ -306,6 +315,7 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
             new_expiration = add_months_to_date(base_date, int(months))
 
         options[CONF_EXPIRATION_DATE] = str(new_expiration)
+        options[CONF_CURRENT_PERIOD_COST] = price
         options["service_period_start"] = str(base_date if not explicit_expiration else today)
         options["service_period_days"] = max(1, (new_expiration - (base_date if not explicit_expiration else today)).days)
         options.update(normalize_status_record(options, STATUS_ACTIVE, changed_at=today))

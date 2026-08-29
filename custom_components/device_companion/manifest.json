@@ -5,8 +5,8 @@
   "config_flow": true,
   "dependencies": ["http"],
   "documentation": "https://github.com/yymonday/HomeAsset-Companion",
-  "issue_tracker": "https://github.com/yymonday/HomeAsset-Companion/issues",
   "integration_type": "helper",
   "iot_class": "calculated",
-  "version": "1.1.0"
+  "issue_tracker": "https://github.com/yymonday/HomeAsset-Companion/issues",
+  "version": "1.1.1"
 }

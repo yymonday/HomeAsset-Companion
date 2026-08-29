@@ -23,6 +23,7 @@ from .const import (
     CONF_CONSUMABLE_PRICE,
     CONF_CONSUMABLE_START_DATE,
     CONF_CONSUMABLES_LIST,
+    CONF_CURRENT_PERIOD_COST,
     CONF_DEVICE_IMAGE,
     CONF_DEVICE_NAME,
     CONF_EARLY_PAYOFF,
@@ -227,6 +228,9 @@ class DeviceCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._init_data.pop(CONF_EXPIRATION_DATE, None)
                     options = _default_options()
                     options[CONF_SUB_PERIOD] = period
+                    options[CONF_CURRENT_PERIOD_COST] = max(
+                        0.0, safe_float(self._init_data.get(CONF_TOTAL_PRICE))
+                    )
                     options[CONF_EXPIRATION_DATE] = str(expiration)
                     options["service_period_start"] = str(start_date)
                     options["service_period_days"] = max(1, (expiration - start_date).days)

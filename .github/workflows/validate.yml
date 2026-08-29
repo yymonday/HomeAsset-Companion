@@ -39,3 +39,15 @@ jobs:
         run: |
           node --check custom_components/device_companion/frontend/device-companion-card.js
           node --check custom_components/device_companion/frontend/device-companion-summary.js
+
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements_test.txt
+      - name: Run tests
+        run: python -m pytest -q

@@ -1,5 +1,5 @@
 /**
- * HomeAsset Companion Detail Card v1.1.0
+ * HomeAsset Companion Detail Card v1.1.1
  * Compatible with legacy V153 entities and the V2 lifecycle schema.
  */
 
@@ -628,6 +628,6 @@ if (!window.customCards.some((card) => card.type === "device-companion-card")) {
     type: "device-companion-card",
     name: "HomeAsset Companion 详情卡",
     preview: true,
-    description: "v1.1.0：统一生命周期状态、准确成本口径与显式服务调用。"
+    description: "v1.1.1：统一生命周期状态、准确成本口径与显式服务调用。"
   });
 }

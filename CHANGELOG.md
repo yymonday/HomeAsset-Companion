@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.1 - 2026-08-29
+
+### Fixed
+
+- 修复 V1 Config Entry 迁移因遗漏 `CONF_KIND` 导入而失败的问题。
+- 修复续订服务仍使用初始价格计算当前月均费用的问题。
+- 保留旧 `quick_action` 续订调用，并让续订后的本期费用参与传感器计算。
+
+### Changed
+
+- 增加配置入口专用 `CONFIG_SCHEMA`、迁移/服务/耗材回归测试和 HACS 品牌图标。
+- CI 增加 pytest、Python 语法和前端语法检查。
+
 ## 1.1.0 - 2026-08-05
 
 ### Added

@@ -1,5 +1,5 @@
 /**
- * HomeAsset Companion Summary Card v1.1.0
+ * HomeAsset Companion Summary Card v1.1.1
  * Uses explicit net-investment, historical-average, and current-running-cost metrics.
  */
 
@@ -322,6 +322,6 @@ if (!window.customCards.some((card) => card.type === "device-companion-summary-c
     type: "device-companion-summary-card",
     name: "HomeAsset Companion 资产大盘",
     preview: true,
-    description: "v1.1.0：净投入、历史月均、当前运行成本和分类占比。",
+    description: "v1.1.1：净投入、历史月均、当前运行成本和分类占比。",
   });
 }

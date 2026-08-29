@@ -23,6 +23,7 @@ from .const import (
     CONF_AUTO_RECORD_REPLACEMENT,
     CONF_CATEGORY,
     CONF_CONSUMABLES_LIST,
+    CONF_CURRENT_PERIOD_COST,
     CONF_DEVICE_IMAGE,
     CONF_DEVICE_NAME,
     CONF_EARLY_PAYOFF,
@@ -547,14 +548,20 @@ class DeviceCompanionSensor(SensorEntity):
         historical_monthly_cost = historical_daily_total * DAYS_PER_MONTH
 
         service_monthly_cost = 0.0
+        current_period_cost = base_purchase
+        if kind == KIND_SERVICE:
+            current_period_cost = max(
+                0.0,
+                safe_float(options.get(CONF_CURRENT_PERIOD_COST), base_purchase),
+            )
         if kind == KIND_SERVICE and status == STATUS_ACTIVE:
             period = options.get(CONF_SUB_PERIOD, "1个月")
             months = {"1个月": 1, "3个月": 3, "半年": 6, "1年": 12}.get(period)
             if months:
-                service_monthly_cost = base_purchase / months
+                service_monthly_cost = current_period_cost / months
             else:
                 period_days = max(1, safe_int(options.get("service_period_days"), 30))
-                service_monthly_cost = base_purchase / period_days * DAYS_PER_MONTH
+                service_monthly_cost = current_period_cost / period_days * DAYS_PER_MONTH
 
         current_monthly_cost = 0.0
         if status == STATUS_ACTIVE:
@@ -595,7 +602,10 @@ class DeviceCompanionSensor(SensorEntity):
             "gross_investment": round(gross_investment, 2),
             "net_investment": round(net_investment, 2),
             "main_net_investment": round(net_main_investment, 2),
-            "renewal_price": round(base_purchase, 2),
+            "renewal_price": round(
+                current_period_cost if kind == KIND_SERVICE else base_purchase, 2
+            ),
+            "current_period_cost": round(current_period_cost, 2),
             "current_reference_value": round(current_reference_value, 2),
             "total_price": round(main_cash_cost + interest + early_fee, 2),
             "net_price": round(net_main_investment, 2),

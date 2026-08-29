@@ -2,8 +2,15 @@
 
 HomeAsset Companion 是一个 Home Assistant 自定义集成，用于记录家庭设备、家电、订阅服务、耗材、配件与纪念物品的生命周期。
 
-> 当前版本：**v1.1.0 稳定性兼容版**  
+> 当前版本：**v1.1.1 稳定性兼容版**
 > 最低建议 Home Assistant：**2026.6.0**
+
+## v1.1.1 主要变化
+
+- 修复旧版 Config Entry 迁移时缺少 `kind` 常量导入导致的迁移失败。
+- 修复续订后“当前月度运行”仍按初始价格计算的问题；续订费用会成为当前周期费用。
+- 补充迁移、服务、耗材和续订成本回归测试。
+- 增加 HACS 品牌图标和 GitHub 自动测试检查。
 
 ## v1.1.0 主要变化
 
@@ -53,8 +60,8 @@ custom_components/device_companion
 前往 **设置 → 仪表盘 → 右上角菜单 → 资源**，添加：
 
 ```text
-/device_companion/device-companion-card.js?v=1.1.0
-/device_companion/device-companion-summary.js?v=1.1.0
+/device_companion/device-companion-card.js?v=1.1.1
+/device_companion/device-companion-summary.js?v=1.1.1
 ```
 
 资源类型均选择 **JavaScript Module**。
@@ -83,7 +90,7 @@ exclude_entities: []
 
 升级前建议先创建 Home Assistant 备份。
 
-1. 用 v1.1.0 覆盖旧的 `custom_components/device_companion`。
+1. 用 v1.1.1 覆盖旧的 `custom_components/device_companion`。
 2. 在仪表盘资源中删除或停用旧资源：
 
 ```text
