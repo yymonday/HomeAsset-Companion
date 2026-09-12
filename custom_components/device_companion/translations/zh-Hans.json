@@ -22,11 +22,14 @@
       },
       "setup_service": {
         "title": "录入虚拟服务",
+        "description": "按实际付款和实际覆盖期限记录订阅；例如月费 140 元、预付 280 元应填写覆盖 2 个月。陪伴天数不会代替付款记录。",
         "data": {
           "device_name": "服务名称",
           "purchase_date": "本次起算日期",
-          "total_price": "单期费用",
+          "total_price": "本次预付金额",
+          "plan_monthly_price": "套餐月费（参考）",
           "sub_period": "标准续订周期",
+          "service_period_months": "本次支付覆盖月数（不填按标准周期）",
           "expiration_date": "到期日（自定义周期必填）"
         }
       },
@@ -99,9 +102,11 @@
           "device_name": "名称",
           "category": "展示分类",
           "purchase_date": "起始日期",
-          "total_price": "主体金额或单期费用",
+          "total_price": "主体金额或初始付款",
           "sync_to_calendar": "同步到 Home Assistant 日历",
           "sub_period": "续订周期",
+          "plan_monthly_price": "套餐月费（参考）",
+          "service_period_months": "当前付款覆盖月数",
           "expiration_date": "到期日",
           "anniversary_name": "纪念日名称",
           "story": "背后故事",

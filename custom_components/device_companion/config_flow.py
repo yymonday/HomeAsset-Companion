@@ -37,8 +37,12 @@ from .const import (
     CONF_LINKED_ENTITY,
     CONF_LINKED_PRICE_ENTITY,
     CONF_LOCATION,
+    CONF_PLAN_MONTHLY_PRICE,
     CONF_PURCHASE_DATE,
     CONF_SCHEMA_VERSION,
+    CONF_SERVICE_CHARGES,
+    CONF_SERVICE_PAYMENTS,
+    CONF_SERVICE_PERIOD_MONTHS,
     CONF_STATUS,
     CONF_STORY,
     CONF_SUB_PERIOD,
@@ -51,6 +55,7 @@ from .const import (
     KIND_SERVICE,
     STATUS_ACTIVE,
     STATUS_SOLD,
+    SUB_PERIOD_MONTHS,
     TRACKING_MODE_MANUAL,
     TRACKING_MODE_SMART,
 )
@@ -81,6 +86,8 @@ def _default_options() -> dict[str, Any]:
         CONF_SYNC_TO_CALENDAR: True,
         CONF_CONSUMABLES_LIST: [],
         CONF_ACCESSORIES_LIST: [],
+        CONF_SERVICE_PAYMENTS: [],
+        CONF_SERVICE_CHARGES: [],
     }
     options.update(normalize_status_record({}, STATUS_ACTIVE))
     return options
@@ -213,27 +220,55 @@ class DeviceCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if period == "自定义" and expiration is None:
                 errors[CONF_EXPIRATION_DATE] = "expiration_required"
             else:
+                coverage_months = max(
+                    1,
+                    int(
+                        safe_float(
+                            user_input.get(
+                                CONF_SERVICE_PERIOD_MONTHS,
+                                SUB_PERIOD_MONTHS.get(period, 1),
+                            )
+                        )
+                    ),
+                )
+                payment_coverage_end = add_months_to_date(
+                    start_date,
+                    coverage_months,
+                )
                 if expiration is None:
-                    expiration = add_months_to_date(
-                        start_date,
-                        {"1个月": 1, "3个月": 3, "半年": 6, "1年": 12}.get(
-                            period, 1
-                        ),
-                    )
+                    expiration = payment_coverage_end
                 if expiration < start_date:
                     errors[CONF_EXPIRATION_DATE] = "expiration_before_start"
                 else:
                     self._init_data[CONF_IS_INSTALLMENT] = False
                     self._init_data.pop(CONF_SUB_PERIOD, None)
                     self._init_data.pop(CONF_EXPIRATION_DATE, None)
+                    self._init_data.pop(CONF_PLAN_MONTHLY_PRICE, None)
+                    self._init_data.pop(CONF_SERVICE_PERIOD_MONTHS, None)
                     options = _default_options()
                     options[CONF_SUB_PERIOD] = period
+                    options[CONF_PLAN_MONTHLY_PRICE] = max(
+                        0.0, safe_float(user_input.get(CONF_PLAN_MONTHLY_PRICE))
+                    )
+                    options[CONF_SERVICE_PERIOD_MONTHS] = coverage_months
                     options[CONF_CURRENT_PERIOD_COST] = max(
                         0.0, safe_float(self._init_data.get(CONF_TOTAL_PRICE))
                     )
                     options[CONF_EXPIRATION_DATE] = str(expiration)
                     options["service_period_start"] = str(start_date)
                     options["service_period_days"] = max(1, (expiration - start_date).days)
+                    options[CONF_SERVICE_PAYMENTS] = [
+                        {
+                            "id": f"payment_{uuid.uuid4().hex[:12]}",
+                            "payment_type": "initial",
+                            "amount": options[CONF_CURRENT_PERIOD_COST],
+                            "paid_at": str(start_date),
+                            "period_start": str(start_date),
+                            "period_end": str(payment_coverage_end),
+                            "months_covered": coverage_months,
+                            "description": "首次订阅",
+                        }
+                    ]
                     return self.async_create_entry(
                         title=self._init_data[CONF_DEVICE_NAME],
                         data=self._init_data,
@@ -251,6 +286,9 @@ class DeviceCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_TOTAL_PRICE, default=0.0): vol.All(
                         vol.Coerce(float), vol.Range(min=0)
                     ),
+                    vol.Required(CONF_PLAN_MONTHLY_PRICE, default=0.0): vol.All(
+                        vol.Coerce(float), vol.Range(min=0)
+                    ),
                     vol.Required(
                         CONF_SUB_PERIOD, default="1个月"
                     ): selector.SelectSelector(
@@ -258,6 +296,9 @@ class DeviceCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             options=SUB_PERIODS,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
+                    ),
+                    vol.Optional(CONF_SERVICE_PERIOD_MONTHS): vol.All(
+                        vol.Coerce(int), vol.Range(min=1, max=120)
                     ),
                     vol.Optional(CONF_EXPIRATION_DATE): selector.DateSelector(),
                 }
@@ -508,6 +549,23 @@ class DeviceCompanionOptionsFlowHandler(config_entries.OptionsFlow):
             options[CONF_SYNC_TO_CALENDAR] = user_input.get(
                 CONF_SYNC_TO_CALENDAR, True
             )
+            if kind == KIND_SERVICE:
+                options[CONF_PLAN_MONTHLY_PRICE] = max(
+                    0.0, safe_float(user_input.get(CONF_PLAN_MONTHLY_PRICE))
+                )
+                options[CONF_SERVICE_PERIOD_MONTHS] = max(
+                    1,
+                    int(
+                        safe_float(
+                            user_input.get(
+                                CONF_SERVICE_PERIOD_MONTHS,
+                                SUB_PERIOD_MONTHS.get(
+                                    user_input.get(CONF_SUB_PERIOD), 1
+                                ),
+                            )
+                        )
+                    ),
+                )
             for key in (
                 CONF_SUB_PERIOD,
                 CONF_EXPIRATION_DATE,
@@ -589,6 +647,31 @@ class DeviceCompanionOptionsFlowHandler(config_entries.OptionsFlow):
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             )
+            schema[
+                vol.Required(
+                    CONF_PLAN_MONTHLY_PRICE,
+                    default=safe_float(options.get(CONF_PLAN_MONTHLY_PRICE)),
+                )
+            ] = vol.All(vol.Coerce(float), vol.Range(min=0))
+            schema[
+                vol.Required(
+                    CONF_SERVICE_PERIOD_MONTHS,
+                    default=max(
+                        1,
+                        int(
+                            safe_float(
+                                options.get(
+                                    CONF_SERVICE_PERIOD_MONTHS,
+                                    SUB_PERIOD_MONTHS.get(
+                                        options.get(CONF_SUB_PERIOD, "1个月"),
+                                        1,
+                                    ),
+                                )
+                            )
+                        ),
+                    ),
+                )
+            ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=120))
             schema[
                 vol.Optional(
                     CONF_EXPIRATION_DATE,

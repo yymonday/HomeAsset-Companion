@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "device_companion"
-INTEGRATION_VERSION = "1.1.1"
+INTEGRATION_VERSION = "1.2.0"
 DATA_LOCKS = "entry_locks"
 
 CONF_DEVICE_NAME = "device_name"
@@ -20,7 +20,18 @@ CONF_KIND = "kind"
 CONF_EXPIRATION_DATE = "expiration_date"
 CONF_SUB_PERIOD = "sub_period"
 CONF_CURRENT_PERIOD_COST = "current_period_cost"
+CONF_PLAN_MONTHLY_PRICE = "plan_monthly_price"
+CONF_SERVICE_PERIOD_MONTHS = "service_period_months"
+CONF_SERVICE_PAYMENTS = "service_payments"
+CONF_SERVICE_CHARGES = "service_charges"
 CONF_SCHEMA_VERSION = "schema_version"
+
+SUB_PERIOD_MONTHS = {
+    "1个月": 1,
+    "3个月": 3,
+    "半年": 6,
+    "1年": 12,
+}
 
 CONF_CONSUMABLE_NAME = "consumable_name"
 CONF_CONSUMABLE_PRICE = "consumable_price"

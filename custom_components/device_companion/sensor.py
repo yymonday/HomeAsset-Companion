@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import datetime
 import logging
@@ -13,7 +14,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
-    async_call_later,
     async_track_state_change_event,
     async_track_time_change,
 )
@@ -36,21 +36,28 @@ from .const import (
     CONF_LINKED_ENTITY,
     CONF_LINKED_PRICE_ENTITY,
     CONF_LOCATION,
+    CONF_PLAN_MONTHLY_PRICE,
     CONF_PURCHASE_DATE,
     CONF_RECOVERY_AMOUNT,
     CONF_STATUS_CHANGED_AT,
     CONF_STORY,
     CONF_SUB_PERIOD,
+    CONF_SERVICE_CHARGES,
+    CONF_SERVICE_PAYMENTS,
+    CONF_SERVICE_PERIOD_MONTHS,
     CONF_TOTAL_PRICE,
+    DATA_LOCKS,
     DOMAIN,
     KIND_ASSET,
     KIND_EVENT,
     KIND_MEMORIAL,
     KIND_SERVICE,
     STATUS_ACTIVE,
+    STATUS_CANCELED,
     STATUS_EXPIRED,
     STATUS_IDLE,
     STATUS_SOLD,
+    SUB_PERIOD_MONTHS,
     TRACKING_MODE_SMART,
 )
 from .helpers import (
@@ -60,6 +67,7 @@ from .helpers import (
     safe_date,
     safe_float,
     safe_int,
+    safe_record_list,
     status_label,
     today_local,
 )
@@ -78,11 +86,11 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [DeviceCompanionSensor(entry)]
     entities.extend(
         ConsumableSensor(entry, item)
-        for item in entry.options.get(CONF_CONSUMABLES_LIST, [])
+        for item in safe_record_list(entry.options.get(CONF_CONSUMABLES_LIST))
     )
     entities.extend(
         AccessorySensor(entry, item)
-        for item in entry.options.get(CONF_ACCESSORIES_LIST, [])
+        for item in safe_record_list(entry.options.get(CONF_ACCESSORIES_LIST))
     )
     async_add_entities(entities)
 
@@ -229,6 +237,7 @@ class DeviceCompanionSensor(SensorEntity):
     def __init__(self, entry: ConfigEntry) -> None:
         self._entry = entry
         self._replacement_reset_inflight: set[str] = set()
+        self._replacement_reset_tasks: set[asyncio.Task[None]] = set()
         self._attr_name = f"{entry.data.get(CONF_DEVICE_NAME, '未知')} 陪伴"
         self._attr_unique_id = f"companion_{entry.entry_id}"
         self._device_name = entry.data.get(CONF_DEVICE_NAME, "未知")
@@ -251,7 +260,9 @@ class DeviceCompanionSensor(SensorEntity):
         """Subscribe to linked entities and the local midnight boundary."""
         linked_entities = {
             item.get(CONF_LINKED_ENTITY)
-            for item in self._entry.options.get(CONF_CONSUMABLES_LIST, [])
+            for item in safe_record_list(
+                self._entry.options.get(CONF_CONSUMABLES_LIST)
+            )
             if item.get(CONF_LINKED_ENTITY)
         }
         linked_price = self._entry.options.get(CONF_LINKED_PRICE_ENTITY)
@@ -276,6 +287,14 @@ class DeviceCompanionSensor(SensorEntity):
                 second=5,
             )
         )
+        self.async_on_remove(self._cancel_replacement_reset_tasks)
+
+    @callback
+    def _cancel_replacement_reset_tasks(self) -> None:
+        """Cancel pending replacement handling when the entity is removed."""
+        for task in self._replacement_reset_tasks:
+            task.cancel()
+        self._replacement_reset_tasks.clear()
 
     @callback
     def _async_midnight_update(self, now: datetime) -> None:
@@ -290,12 +309,16 @@ class DeviceCompanionSensor(SensorEntity):
             return
 
         linked_entity = event.data.get("entity_id")
-        for item in self._entry.options.get(CONF_CONSUMABLES_LIST, []):
+        for item in safe_record_list(
+            self._entry.options.get(CONF_CONSUMABLES_LIST)
+        ):
             if item.get(CONF_LINKED_ENTITY) != linked_entity:
                 continue
             if not self._is_replacement_reset(old_state.state, new_state.state):
                 continue
-            self.hass.async_create_task(self._async_handle_detected_reset(item))
+            task = self.hass.async_create_task(self._async_handle_detected_reset(item))
+            self._replacement_reset_tasks.add(task)
+            task.add_done_callback(self._replacement_reset_tasks.discard)
 
     @staticmethod
     def _is_replacement_reset(old_value: str, new_value: str) -> bool:
@@ -315,20 +338,25 @@ class DeviceCompanionSensor(SensorEntity):
         if not cons_id or cons_id in self._replacement_reset_inflight:
             return
 
-        latest = self.hass.config_entries.async_get_entry(self._entry.entry_id)
-        latest_item = next(
-            (candidate for candidate in (latest.options.get(CONF_CONSUMABLES_LIST, []) if latest else [])
-             if candidate.get("id") == cons_id),
-            item,
-        )
-        if latest_item.get("last_detected_reset") == str(today_local()):
-            return
-
         self._replacement_reset_inflight.add(cons_id)
-        name = latest_item.get("name", "耗材")
-        price = max(0.0, safe_float(latest_item.get("price")))
-        if latest_item.get(CONF_AUTO_RECORD_REPLACEMENT, False):
-            try:
+        try:
+            latest = self.hass.config_entries.async_get_entry(self._entry.entry_id)
+            latest_item = next(
+                (
+                    candidate
+                    for candidate in safe_record_list(
+                        latest.options.get(CONF_CONSUMABLES_LIST) if latest else None
+                    )
+                    if candidate.get("id") == cons_id
+                ),
+                item,
+            )
+            if latest_item.get("last_detected_reset") == str(today_local()):
+                return
+
+            name = latest_item.get("name", "耗材")
+            price = max(0.0, safe_float(latest_item.get("price")))
+            if latest_item.get(CONF_AUTO_RECORD_REPLACEMENT, False):
                 await self.hass.services.async_call(
                     DOMAIN,
                     "replace_consumable",
@@ -339,39 +367,68 @@ class DeviceCompanionSensor(SensorEntity):
                     },
                     blocking=True,
                 )
-            finally:
-                self._replacement_reset_inflight.discard(cons_id)
-            return
+                return
 
-        self.hass.bus.async_fire(
-            "device_companion_consumable_replacement_detected",
-            {
-                "entity_id": self.entity_id,
-                "cons_id": cons_id,
-                "name": name,
-                "suggested_cost": price,
-            },
-        )
-        await self.hass.services.async_call(
-            "persistent_notification",
-            "create",
-            {
-                "notification_id": f"device_companion_{self._entry.entry_id}_{cons_id}",
-                "title": "检测到耗材可能已更换",
-                "message": (
-                    f"{self._device_name} 的“{name}”状态从低余量恢复到高余量。"
-                    "为避免状态抖动造成重复记账，本次未自动增加费用；请在陪伴卡片中确认。"
-                ),
-            },
-            blocking=False,
-        )
-        self.async_on_remove(
-            async_call_later(
-                self.hass,
-                300,
-                lambda now: self._replacement_reset_inflight.discard(cons_id),
+            if not await self._async_mark_detected_reset(cons_id):
+                return
+
+            self.hass.bus.async_fire(
+                "device_companion_consumable_replacement_detected",
+                {
+                    "entity_id": self.entity_id,
+                    "cons_id": cons_id,
+                    "name": name,
+                    "suggested_cost": price,
+                },
             )
-        )
+            if self.hass.services.has_service(
+                "persistent_notification", "create"
+            ):
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "notification_id": f"device_companion_{self._entry.entry_id}_{cons_id}",
+                        "title": "检测到耗材可能已更换",
+                        "message": (
+                            f"{self._device_name} 的“{name}”状态从低余量恢复到高余量。"
+                            "为避免状态抖动造成重复记账，本次未自动增加费用；请在陪伴卡片中确认。"
+                        ),
+                    },
+                    blocking=False,
+                )
+            else:
+                _LOGGER.debug(
+                    "Persistent notification service is unavailable for %s",
+                    self.entity_id,
+                )
+        finally:
+            self._replacement_reset_inflight.discard(cons_id)
+
+    async def _async_mark_detected_reset(self, cons_id: str) -> bool:
+        """Persist a manual detection marker under the entry write lock."""
+        locks = self.hass.data.setdefault(DOMAIN, {}).setdefault(DATA_LOCKS, {})
+        lock = locks.setdefault(self._entry.entry_id, asyncio.Lock())
+        detected_date = str(today_local())
+
+        async with lock:
+            latest = self.hass.config_entries.async_get_entry(self._entry.entry_id)
+            if latest is None:
+                return False
+            options = deepcopy(dict(latest.options))
+            consumables = deepcopy(
+                safe_record_list(options.get(CONF_CONSUMABLES_LIST))
+            )
+            target = next(
+                (candidate for candidate in consumables if candidate.get("id") == cons_id),
+                None,
+            )
+            if target is None or target.get("last_detected_reset") == detected_date:
+                return False
+            target["last_detected_reset"] = detected_date
+            options[CONF_CONSUMABLES_LIST] = consumables
+            self.hass.config_entries.async_update_entry(latest, options=options)
+            return True
 
     def _compute(self) -> tuple[int, dict[str, Any]]:
         today = today_local()
@@ -383,6 +440,16 @@ class DeviceCompanionSensor(SensorEntity):
         expiration_date = safe_date(options.get(CONF_EXPIRATION_DATE))
 
         stored_status = legacy_status(options)
+        if kind == KIND_SERVICE and stored_status not in (
+            STATUS_ACTIVE,
+            STATUS_CANCELED,
+        ):
+            _LOGGER.warning(
+                "Invalid lifecycle status %s for service entry %s; treating it as active",
+                stored_status,
+                self._entry.entry_id,
+            )
+            stored_status = STATUS_ACTIVE
         status = _effective_status(stored_status, kind, expiration_date, today)
         end_date = _record_end_date(
             options,
@@ -428,7 +495,7 @@ class DeviceCompanionSensor(SensorEntity):
         processed_consumables: list[dict[str, Any]] = []
         total_consumable_cost = 0.0
         current_consumable_daily = 0.0
-        for source in options.get(CONF_CONSUMABLES_LIST, []):
+        for source in safe_record_list(options.get(CONF_CONSUMABLES_LIST)):
             metrics = _consumable_metrics(self.hass, source, today)
             processed_consumables.append(metrics)
             total_consumable_cost += metrics["accumulated_cost"]
@@ -440,7 +507,7 @@ class DeviceCompanionSensor(SensorEntity):
         accessory_historical_daily = 0.0
         total_saved_value = 0.0
 
-        for source in options.get(CONF_ACCESSORIES_LIST, []):
+        for source in safe_record_list(options.get(CONF_ACCESSORIES_LIST)):
             item = deepcopy(source)
             purchase = safe_date(item.get("purchase_date"), today)
             item_expiration = safe_date(item.get(CONF_EXPIRATION_DATE))
@@ -549,19 +616,80 @@ class DeviceCompanionSensor(SensorEntity):
 
         service_monthly_cost = 0.0
         current_period_cost = base_purchase
+        current_period_extra_cost = 0.0
+        service_period_months = 0
+        plan_monthly_price = 0.0
+        payment_coverage_end = None
+        payment_coverage_status = "untracked"
+        current_month_extra_cost = 0.0
         if kind == KIND_SERVICE:
             current_period_cost = max(
                 0.0,
                 safe_float(options.get(CONF_CURRENT_PERIOD_COST), base_purchase),
             )
+            service_period_months = max(
+                1,
+                safe_int(
+                    options.get(CONF_SERVICE_PERIOD_MONTHS),
+                    SUB_PERIOD_MONTHS.get(options.get(CONF_SUB_PERIOD), 1),
+                ),
+            )
+            plan_monthly_price = max(
+                0.0, safe_float(options.get(CONF_PLAN_MONTHLY_PRICE))
+            )
+            if plan_monthly_price <= 0:
+                plan_monthly_price = current_period_cost / service_period_months
+            service_period_start = safe_date(
+                options.get("service_period_start"), purchase_date
+            )
+            for charge in safe_record_list(options.get(CONF_SERVICE_CHARGES)):
+                charge_start = safe_date(charge.get("period_start"))
+                charge_end = safe_date(charge.get("period_end"))
+                charge_cost = max(0.0, safe_float(charge.get("cost")))
+                if charge_start is None or charge_end is None:
+                    continue
+                if charge_end < charge_start:
+                    _LOGGER.warning(
+                        "Ignoring service charge with reversed period on %s",
+                        self._entry.entry_id,
+                    )
+                    continue
+                if charge_start <= today <= charge_end:
+                    current_month_extra_cost += charge_cost
+                if charge_start <= today and charge_end >= service_period_start and (
+                    expiration_date is None or charge_start <= expiration_date
+                ):
+                    current_period_extra_cost += charge_cost
+            payment_ends = [
+                payment_end
+                for payment in safe_record_list(options.get(CONF_SERVICE_PAYMENTS))
+                if (payment_end := safe_date(payment.get("period_end"))) is not None
+            ]
+            if payment_ends:
+                payment_coverage_end = max(payment_ends)
+                payment_coverage_status = "ok"
+                if (
+                    expiration_date is not None
+                    and expiration_date > today
+                    and payment_coverage_end != expiration_date
+                ):
+                    payment_coverage_status = "mismatch"
+        current_period_total_cost = current_period_cost + current_period_extra_cost
         if kind == KIND_SERVICE and status == STATUS_ACTIVE:
-            period = options.get(CONF_SUB_PERIOD, "1个月")
-            months = {"1个月": 1, "3个月": 3, "半年": 6, "1年": 12}.get(period)
-            if months:
-                service_monthly_cost = current_period_cost / months
+            if service_period_months:
+                # Prepaid base cost is amortized over the paid coverage. A
+                # one-off upgrade or quota purchase is paid this month, so it
+                # is not spread over every month in the prepaid period.
+                service_monthly_cost = (
+                    current_period_cost / service_period_months
+                    + current_month_extra_cost
+                )
             else:
                 period_days = max(1, safe_int(options.get("service_period_days"), 30))
-                service_monthly_cost = current_period_cost / period_days * DAYS_PER_MONTH
+                service_monthly_cost = (
+                    current_period_cost / period_days * DAYS_PER_MONTH
+                    + current_month_extra_cost
+                )
 
         current_monthly_cost = 0.0
         if status == STATUS_ACTIVE:
@@ -603,9 +731,28 @@ class DeviceCompanionSensor(SensorEntity):
             "net_investment": round(net_investment, 2),
             "main_net_investment": round(net_main_investment, 2),
             "renewal_price": round(
-                current_period_cost if kind == KIND_SERVICE else base_purchase, 2
+                plan_monthly_price
+                * SUB_PERIOD_MONTHS.get(options.get(CONF_SUB_PERIOD), 1)
+                if kind == KIND_SERVICE and plan_monthly_price > 0
+                else current_period_cost if kind == KIND_SERVICE else base_purchase,
+                2,
             ),
             "current_period_cost": round(current_period_cost, 2),
+            "current_period_base_monthly_cost": round(
+                current_period_cost / service_period_months
+                if kind == KIND_SERVICE and service_period_months
+                else 0.0,
+                2,
+            ),
+            "current_period_extra_cost": round(current_period_extra_cost, 2),
+            "current_month_extra_cost": round(current_month_extra_cost, 2),
+            "current_period_total_cost": round(current_period_total_cost, 2),
+            "plan_monthly_price": round(plan_monthly_price, 2),
+            "service_period_months": service_period_months,
+            "payment_coverage_end": (
+                str(payment_coverage_end) if payment_coverage_end else ""
+            ),
+            "payment_coverage_status": payment_coverage_status,
             "current_reference_value": round(current_reference_value, 2),
             "total_price": round(main_cash_cost + interest + early_fee, 2),
             "net_price": round(net_main_investment, 2),
@@ -622,6 +769,8 @@ class DeviceCompanionSensor(SensorEntity):
             "service_percent": service_percent,
             "service_remain_days": service_remain_days,
             "service_monthly_cost": round(service_monthly_cost, 2),
+            "service_charges": safe_record_list(options.get(CONF_SERVICE_CHARGES)),
+            "service_payments": safe_record_list(options.get(CONF_SERVICE_PAYMENTS)),
             "consumables_list": processed_consumables,
             "accessories_list": processed_accessories,
             "installment_interest": interest,
@@ -636,6 +785,14 @@ class DeviceCompanionSensor(SensorEntity):
         if kind == KIND_SERVICE and service_percent is not None and service_percent < 20:
             badges.append(
                 {"icon": "mdi:clock-alert", "label": "即将到期", "color": "#E53935"}
+            )
+        if kind == KIND_SERVICE and payment_coverage_status == "mismatch":
+            badges.append(
+                {
+                    "icon": "mdi:cash-alert",
+                    "label": "付款覆盖需核对",
+                    "color": "#FF9800",
+                }
             )
         if status == STATUS_IDLE:
             badges.append(
@@ -725,18 +882,26 @@ class ConsumableSensor(SensorEntity):
         if linked:
             self.async_on_remove(
                 async_track_state_change_event(
-                    self.hass, [linked], lambda event: self.async_write_ha_state()
+                    self.hass, [linked], self._async_linked_state_changed
                 )
             )
         self.async_on_remove(
             async_track_time_change(
                 self.hass,
-                lambda now: self.async_write_ha_state(),
+                self._async_midnight_update,
                 hour=0,
                 minute=0,
                 second=10,
             )
         )
+
+    @callback
+    def _async_linked_state_changed(self, event) -> None:
+        self.async_write_ha_state()
+
+    @callback
+    def _async_midnight_update(self, now: datetime) -> None:
+        self.async_write_ha_state()
 
     @property
     def available(self) -> bool:

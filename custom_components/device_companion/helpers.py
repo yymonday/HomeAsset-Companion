@@ -52,6 +52,13 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def safe_record_list(value: Any) -> list[dict[str, Any]]:
+    """Return only mapping records from a persisted list-like value."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def safe_date(value: Any, default: date | None = None) -> date | None:
     """Parse a date-like value."""
     if value in (None, ""):

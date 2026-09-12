@@ -11,7 +11,7 @@ renew_service:
           domain: sensor
     cost:
       name: 本次费用
-      description: 留空时使用该服务当前设置的单期费用。
+      description: 留空时按套餐月费乘以延长月数计算；旧条目无套餐月费时沿用当前周期费用。
       required: false
       selector:
         number:
@@ -22,7 +22,7 @@ renew_service:
           unit_of_measurement: 元
     months:
       name: 延长月数
-      description: 留空时按原订阅周期延长。
+      description: 留空时按标准续订周期延长；它可以与当前预付覆盖月数不同。
       required: false
       selector:
         number:
@@ -36,6 +36,59 @@ renew_service:
       required: false
       selector:
         date:
+
+record_service_charge:
+  name: 记录订阅附加支出
+  description: 记录升级差价或本期额外额度费用，不改变服务到期日。
+  fields:
+    entity_id:
+      name: 陪伴实体
+      description: HomeAsset Companion 主传感器实体。
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    charge_type:
+      name: 支出类型
+      description: 升级差价、额外额度或其他订阅附加费用。
+      required: true
+      selector:
+        select:
+          options:
+            - label: 升级订阅
+              value: upgrade
+            - label: 额外额度
+              value: extra_quota
+            - label: 其他
+              value: other
+    cost:
+      name: 已支付金额
+      description: 只填写实际已经支付的增量金额。
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 0.01
+          mode: box
+          unit_of_measurement: 元
+    new_monthly_price:
+      name: 升级后套餐月费
+      description: 仅升级订阅时填写；用于后续续订默认金额，不改变当前到期日。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000000
+          step: 0.01
+          mode: box
+          unit_of_measurement: 元
+    description:
+      name: 说明
+      description: 可填写套餐名称、额度数量或账单备注。
+      required: false
+      selector:
+        text:
 
 replace_consumable:
   name: 确认更换耗材

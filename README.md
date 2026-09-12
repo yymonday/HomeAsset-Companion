@@ -2,8 +2,14 @@
 
 HomeAsset Companion 是一个 Home Assistant 自定义集成，用于记录家庭设备、家电、订阅服务、耗材、配件与纪念物品的生命周期。
 
-> 当前版本：**v1.1.1 稳定性兼容版**
+> 当前版本：**v1.2.0 订阅账期版**
 > 最低建议 Home Assistant：**2026.6.0**
+
+## v1.2.0 主要变化
+
+- 增加“先付款、后享受”的实际预付账期记录：区分套餐月费、付款金额和实际覆盖月数。
+- 增加升级差价与额外额度的单独记账，并将附加支出限定在付款发生的自然月。
+- 卡片展示本期基础、本期追加、本期合计、当前月额外支出和付款覆盖核对提示。
 
 ## v1.1.1 主要变化
 
@@ -60,8 +66,8 @@ custom_components/device_companion
 前往 **设置 → 仪表盘 → 右上角菜单 → 资源**，添加：
 
 ```text
-/device_companion/device-companion-card.js?v=1.1.1
-/device_companion/device-companion-summary.js?v=1.1.1
+/device_companion/device-companion-card.js?v=1.2.0
+/device_companion/device-companion-summary.js?v=1.2.0
 ```
 
 资源类型均选择 **JavaScript Module**。
@@ -90,7 +96,7 @@ exclude_entities: []
 
 升级前建议先创建 Home Assistant 备份。
 
-1. 用 v1.1.1 覆盖旧的 `custom_components/device_companion`。
+1. 用 v1.2.0 覆盖旧的 `custom_components/device_companion`。
 2. 在仪表盘资源中删除或停用旧资源：
 
 ```text
@@ -127,7 +133,8 @@ exclude_entities: []
 
 当前版本统计：
 
-- 有效订阅折算月费；
+- 当前服务周期实际预付金额按实际覆盖月数折算的月费；
+- 当前服务周期内本月已支付的升级差价或额外额度，作为本月一次性增量；
 - 当前耗材消耗速度折算月成本。
 
 闲置、封存、售出、报废、遗失、赠出、取消或到期记录不再计入当前月度运行。
@@ -151,11 +158,14 @@ exclude_entities: []
 v1.1.0 提供：
 
 - `device_companion.renew_service`
+- `device_companion.record_service_charge`
 - `device_companion.replace_consumable`
 - `device_companion.set_lifecycle`
 - `device_companion.update_item_image`
 
 旧版 `device_companion.quick_action` 暂时保留，用于兼容旧自动化和旧卡片，后续大版本可能移除。
+
+订阅采用“先付款、后享受”的记账方式：`plan_monthly_price` 是套餐参考月费，`total_price` 是首次实际预付金额，`service_period_months` 是这笔预付覆盖的月数。比如月费 140 元、一次预付 280 元，应记录为覆盖 2 个月；不能因为到期日跨度看起来接近 3 个月就按 3 个月计算。每次续订支付写入累计投入并延长到期日。升级差价或额外额度使用 `record_service_charge` 单独记录，只增加已支付金额，不改变到期日；基础预付费用按覆盖月数折算，升级差价/额外额度则计入发生当月的一次性支出。升级可同时填写新的后续套餐月费，额外额度不应填写该字段。旧条目没有付款明细时不会凭空补记，并会显示为未追踪付款覆盖。
 
 ## 智能耗材逻辑
 

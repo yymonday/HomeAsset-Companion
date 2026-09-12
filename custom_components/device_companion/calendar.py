@@ -24,7 +24,14 @@ from .const import (
     KIND_MEMORIAL,
     KIND_SERVICE,
 )
-from .helpers import infer_kind, is_terminal_status, legacy_status, safe_date, today_local
+from .helpers import (
+    infer_kind,
+    is_terminal_status,
+    legacy_status,
+    safe_date,
+    safe_record_list,
+    today_local,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -133,7 +140,9 @@ class DeviceCompanionCalendar(CalendarEntity):
                     )
                 )
 
-        for accessory in self._entry.options.get(CONF_ACCESSORIES_LIST, []):
+        for accessory in safe_record_list(
+            self._entry.options.get(CONF_ACCESSORIES_LIST)
+        ):
             if is_terminal_status(legacy_status(accessory)):
                 continue
             expiration = safe_date(accessory.get(CONF_EXPIRATION_DATE))

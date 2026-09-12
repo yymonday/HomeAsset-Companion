@@ -1,5 +1,5 @@
 /**
- * HomeAsset Companion Detail Card v1.1.1
+ * HomeAsset Companion Detail Card v1.2.0
  * Compatible with legacy V153 entities and the V2 lifecycle schema.
  */
 
@@ -59,6 +59,8 @@ class DeviceCompanionCard extends HTMLElement {
         .cost-tags-wrapper { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
         .cost-tag { font-size: 0.7rem; padding: 4px 12px; border-radius: 8px; background: rgba(128,128,128,0.05); color: var(--dc-text-sub); display: inline-flex; align-items: baseline; gap: 4px; font-weight: 500; border: 1px solid rgba(128,128,128,0.08); }
         .cost-tag .hl { color: var(--dc-theme); font-weight: 800; }
+        .cost-tag.warning { color: #E65100; background: rgba(255,152,0,0.1); border-color: rgba(255,152,0,0.3); }
+        .cost-tag.warning .hl { color: #E65100; }
         .saved-value-tag { font-size: 0.75rem; padding: 4px 12px; border-radius: 8px; background: linear-gradient(90deg, #FFD700, #FFA500); color: #fff; display: inline-flex; align-items: center; gap: 4px; font-weight: 700; box-shadow: 0 2px 6px rgba(255,165,0,0.3); }
         
         .memorial-diary { margin-top: 16px; padding: 18px; border-radius: 16px; background: linear-gradient(135deg, rgba(var(--dc-theme-rgb), 0.08) 0%, rgba(var(--dc-theme-rgb), 0.02) 100%); border: 1px solid rgba(var(--dc-theme-rgb), 0.2); box-shadow: inset 2px 2px 10px rgba(0,0,0,0.02); }
@@ -155,6 +157,7 @@ class DeviceCompanionCard extends HTMLElement {
                 <span id="service-header-text" style="display:flex; align-items:center;">服务有效期</span>
                 <div style="display:flex; gap:8px; align-items:center;">
                     <span id="service-remain-text">...</span>
+                    <button class="action-btn-outline" id="btn-record-service-charge" style="display:none;"><ha-icon icon="mdi:cash-plus" style="--mdc-icon-size:12px; margin-right:2px;"></ha-icon>记一笔</button>
                     <button class="action-btn-outline" id="btn-renew-service" style="display:none;"><ha-icon icon="mdi:refresh" style="--mdc-icon-size:12px; margin-right:2px;"></ha-icon>一键续订</button>
                 </div>
             </div>
@@ -177,11 +180,41 @@ class DeviceCompanionCard extends HTMLElement {
       const confirmed = window.confirm(`确认按原周期续订？\n当前到期：${expiration}\n本次预计费用：￥${price.toFixed(2)}`);
       if (confirmed) this._callAction("renew_service");
     });
+    shadowRoot.getElementById("btn-record-service-charge").addEventListener("click", () => {
+      const rawCost = window.prompt("输入已经支付的升级差价或额外额度金额", "");
+      if (rawCost === null) return;
+      const cost = Number(rawCost);
+      if (!Number.isFinite(cost) || cost < 0) {
+        window.alert("金额必须是大于或等于 0 的数字。");
+        return;
+      }
+      const rawType = window.prompt("类型：upgrade / extra_quota / other", "extra_quota");
+      const charge_type = ["upgrade", "extra_quota", "other"].includes(rawType) ? rawType : "extra_quota";
+      const description = window.prompt("备注（可选）", "本期额外支出") ?? "";
+      const payload = { charge_type, cost, description };
+      if (charge_type === "upgrade") {
+        const rawMonthlyPrice = window.prompt(
+          "升级后套餐月费（留空表示只记录差价，不改变后续续订月费）",
+          dcNumber(this._lastAttrs?.plan_monthly_price).toFixed(2),
+        );
+        if (rawMonthlyPrice === null) return;
+        if (String(rawMonthlyPrice).trim() !== "") {
+          const new_monthly_price = Number(rawMonthlyPrice);
+          if (!Number.isFinite(new_monthly_price) || new_monthly_price < 0) {
+            window.alert("升级后的套餐月费必须是大于或等于 0 的数字。");
+            return;
+          }
+          payload.new_monthly_price = new_monthly_price;
+        }
+      }
+      this._callAction("record_service_charge", payload);
+    });
   }
 
   _callAction(action, data = {}) {
     const services = {
       renew_service: "renew_service",
+      record_service_charge: "record_service_charge",
       replace_consumable: "replace_consumable",
       set_lifecycle: "set_lifecycle",
     };
@@ -334,6 +367,14 @@ class DeviceCompanionCard extends HTMLElement {
         `<div class="stat-item"><span class="stat-label">历史日均成本</span><span class="stat-value">￥${historicalDaily.toFixed(2)}</span></div>`,
         `<div class="stat-item"><span class="stat-label">${isService ? "服务累计投入" : "主体净投入"}</span><span class="stat-value">￥${mainNet.toFixed(2)}</span></div>`,
       ];
+      if (isService) {
+        gridItems.push(
+          `<div class="stat-item"><span class="stat-label">套餐月费（参考）</span><span class="stat-value">￥${dcNumber(attrs.plan_monthly_price).toFixed(2)}</span></div>`,
+          `<div class="stat-item"><span class="stat-label">本期基础（${Math.max(1, dcNumber(attrs.service_period_months, 1))}个月）</span><span class="stat-value">￥${dcNumber(attrs.current_period_cost).toFixed(2)}</span></div>`,
+          `<div class="stat-item"><span class="stat-label">本期追加</span><span class="stat-value" style="color:var(--dc-theme)">￥${dcNumber(attrs.current_period_extra_cost).toFixed(2)}</span></div>`,
+          `<div class="stat-item"><span class="stat-label">本期合计</span><span class="stat-value" style="color:var(--dc-theme)">￥${dcNumber(attrs.current_period_total_cost).toFixed(2)}</span></div>`,
+        );
+      }
       if (hasAccessories && !isService) {
         gridItems.push(`<div class="stat-item"><span class="stat-label">主体与配件净投入</span><span class="stat-value" style="color:var(--dc-theme)">￥${(mainNet + totalAcc).toFixed(2)}</span></div>`);
       }
@@ -349,6 +390,19 @@ class DeviceCompanionCard extends HTMLElement {
         `<div class="cost-tag">历史月均 <span class="hl">￥${historicalMonthly.toFixed(2)}</span></div>`,
         `<div class="cost-tag">当前月度运行 <span class="hl">￥${currentMonthly.toFixed(2)}</span></div>`,
       ];
+      if (isService && attrs.payment_coverage_end) {
+        const mismatch = attrs.payment_coverage_status === "mismatch";
+        breakdownItems.push(
+          `<div class="cost-tag${mismatch ? " warning" : ""}">${mismatch ? "付款覆盖需核对" : "已付款覆盖至"} <span class="hl">${dcEscape(attrs.payment_coverage_end)}</span></div>`,
+        );
+      } else if (isService && attrs.payment_coverage_status === "untracked") {
+        breakdownItems.push(`<div class="cost-tag warning">付款覆盖未追踪</div>`);
+      }
+      if (isService && dcNumber(attrs.current_month_extra_cost) > 0) {
+        breakdownItems.push(
+          `<div class="cost-tag">本月额外支出 <span class="hl">￥${dcNumber(attrs.current_month_extra_cost).toFixed(2)}</span></div>`,
+        );
+      }
       if (isService && dcNumber(attrs.total_saved_value) > 0) {
         breakdownItems.unshift(`<div class="saved-value-tag"><ha-icon icon="mdi:gift-open" style="--mdc-icon-size:14px;color:white;"></ha-icon>附加权益价值 ￥${dcNumber(attrs.total_saved_value).toFixed(2)}</div>`);
       }
@@ -378,6 +432,7 @@ class DeviceCompanionCard extends HTMLElement {
       const remain = shadow.getElementById("service-remain-text");
       const fill = shadow.getElementById("service-fill");
       const renew = shadow.getElementById("btn-renew-service");
+      const recordCharge = shadow.getElementById("btn-record-service-charge");
       const expiration = attrs.expiration_date;
       if (expiration === "永久") {
         header.textContent = "永久有效";
@@ -385,6 +440,7 @@ class DeviceCompanionCard extends HTMLElement {
         fill.style.width = "100%";
         fill.style.backgroundColor = "#4CAF50";
         renew.style.display = "none";
+        recordCharge.style.display = "none";
       } else if (expiration) {
         header.textContent = `订阅至 ${expiration}`;
         remain.textContent = attrs.status === "expired" ? "已到期" : `剩 ${dcNumber(attrs.service_remain_days)} 天`;
@@ -393,15 +449,18 @@ class DeviceCompanionCard extends HTMLElement {
         fill.style.width = `${percent}%`;
         fill.style.backgroundColor = attrs.status === "expired" || days <= 15 ? "#E53935" : days <= 60 ? "#FF9800" : days <= 180 ? "#FFC107" : "#4CAF50";
         renew.style.display = attrs.stored_status === "canceled" ? "none" : "inline-flex";
+        recordCharge.style.display = ["canceled", "expired"].includes(attrs.status) ? "none" : "inline-flex";
       } else {
         header.textContent = "尚未配置到期日";
         remain.textContent = "-";
         fill.style.width = "0%";
         fill.style.backgroundColor = "#E53935";
         renew.style.display = "none";
+        recordCharge.style.display = "none";
       }
     } else {
       serviceContainer.style.display = "none";
+      shadow.getElementById("btn-record-service-charge").style.display = "none";
     }
 
     const consumablesContainer = shadow.getElementById("consumables-container");
@@ -628,6 +687,6 @@ if (!window.customCards.some((card) => card.type === "device-companion-card")) {
     type: "device-companion-card",
     name: "HomeAsset Companion 详情卡",
     preview: true,
-    description: "v1.1.1：统一生命周期状态、准确成本口径与显式服务调用。"
+    description: "v1.2.0：统一生命周期状态、预付账期口径与显式服务调用。"
   });
 }

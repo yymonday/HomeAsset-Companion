@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from datetime import timedelta
 import logging
 from pathlib import Path
 import uuid
@@ -26,8 +27,12 @@ from .const import (
     CONF_CURRENT_PERIOD_COST,
     CONF_EXPIRATION_DATE,
     CONF_KIND,
+    CONF_PLAN_MONTHLY_PRICE,
     CONF_RECOVERY_AMOUNT,
     CONF_SCHEMA_VERSION,
+    CONF_SERVICE_CHARGES,
+    CONF_SERVICE_PAYMENTS,
+    CONF_SERVICE_PERIOD_MONTHS,
     CONF_STATUS,
     CONF_STATUS_CHANGED_AT,
     CONF_SUB_PERIOD,
@@ -37,7 +42,9 @@ from .const import (
     INTEGRATION_VERSION,
     KIND_SERVICE,
     STATUS_ACTIVE,
+    STATUS_CANCELED,
     STATUS_LABELS,
+    SUB_PERIOD_MONTHS,
 )
 from .helpers import (
     add_months_to_date,
@@ -46,6 +53,8 @@ from .helpers import (
     normalize_status_record,
     safe_date,
     safe_float,
+    safe_int,
+    safe_record_list,
     status_label,
     today_local,
     allowed_statuses,
@@ -60,6 +69,7 @@ ALLOWED_STATUS_VALUES = list(STATUS_LABELS)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 SERVICE_RENEW = "renew_service"
+SERVICE_RECORD_CHARGE = "record_service_charge"
 SERVICE_REPLACE = "replace_consumable"
 SERVICE_SET_LIFECYCLE = "set_lifecycle"
 SERVICE_UPDATE_IMAGE = "update_item_image"
@@ -68,21 +78,33 @@ SERVICE_QUICK_ACTION = "quick_action"  # Backward compatibility for V153 cards.
 TARGET_SCHEMA = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_id})
 RENEW_SCHEMA = TARGET_SCHEMA.extend(
     {
-        vol.Optional("cost"): vol.Coerce(float),
+        vol.Optional("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
         vol.Optional("months"): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         vol.Optional(CONF_EXPIRATION_DATE): cv.date,
+    }
+)
+SERVICE_CHARGE_SCHEMA = TARGET_SCHEMA.extend(
+    {
+        vol.Required("charge_type"): vol.In(("upgrade", "extra_quota", "other")),
+        vol.Required("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional("new_monthly_price"): vol.All(
+            vol.Coerce(float), vol.Range(min=0)
+        ),
+        vol.Optional("description", default=""): vol.All(
+            cv.string, vol.Length(max=200)
+        ),
     }
 )
 REPLACE_SCHEMA = TARGET_SCHEMA.extend(
     {
         vol.Required("cons_id"): cv.string,
-        vol.Optional("cost"): vol.Coerce(float),
+        vol.Optional("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 LIFECYCLE_SCHEMA = TARGET_SCHEMA.extend(
     {
         vol.Required(CONF_STATUS): vol.In(ALLOWED_STATUS_VALUES),
-        vol.Optional(CONF_RECOVERY_AMOUNT): vol.Coerce(float),
+        vol.Optional(CONF_RECOVERY_AMOUNT): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 IMAGE_SCHEMA = TARGET_SCHEMA.extend(
@@ -96,7 +118,7 @@ QUICK_ACTION_SCHEMA = vol.Schema(
         vol.Required(ATTR_ENTITY_ID): cv.entity_id,
         vol.Required("action"): cv.string,
         vol.Optional("cons_id"): cv.string,
-        vol.Optional("cost"): vol.Coerce(float),
+        vol.Optional("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
         vol.Optional("image_url"): cv.string,
         vol.Optional("status"): cv.string,
         vol.Optional(CONF_RECOVERY_AMOUNT, default=0.0): vol.Coerce(float),
@@ -110,7 +132,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data[DOMAIN].setdefault(DATA_LOCKS, {})
 
     upload_dir = Path(hass.config.path("www", DOMAIN))
-    await hass.async_add_executor_job(upload_dir.mkdir, parents=True, exist_ok=True)
+    await hass.async_add_executor_job(upload_dir.mkdir, 0o777, True, True)
 
     await hass.http.async_register_static_paths(
         [
@@ -175,6 +197,25 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_CURRENT_PERIOD_COST,
             max(0.0, safe_float(data.get(CONF_TOTAL_PRICE))),
         )
+        if not isinstance(options.get(CONF_SERVICE_CHARGES), list):
+            options[CONF_SERVICE_CHARGES] = []
+        if not isinstance(options.get(CONF_SERVICE_PAYMENTS), list):
+            options[CONF_SERVICE_PAYMENTS] = []
+        period_months = max(
+            1,
+            safe_int(
+                options.get(CONF_SERVICE_PERIOD_MONTHS),
+                SUB_PERIOD_MONTHS.get(options.get(CONF_SUB_PERIOD), 1),
+            ),
+        )
+        if safe_int(options.get(CONF_SERVICE_PERIOD_MONTHS)) < 1:
+            options[CONF_SERVICE_PERIOD_MONTHS] = period_months
+        if safe_float(options.get(CONF_PLAN_MONTHLY_PRICE)) < 0:
+            options[CONF_PLAN_MONTHLY_PRICE] = 0.0
+        options.setdefault(
+            CONF_PLAN_MONTHLY_PRICE,
+            safe_float(options.get(CONF_CURRENT_PERIOD_COST)) / period_months,
+        )
 
     main_status = legacy_status(options)
     options = normalize_status_record(
@@ -187,7 +228,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     migrated_consumables: list[dict] = []
-    for consumable in options.get(CONF_CONSUMABLES_LIST, []):
+    for consumable in safe_record_list(options.get(CONF_CONSUMABLES_LIST)):
         item = deepcopy(consumable)
         item.setdefault(CONF_AUTO_RECORD_REPLACEMENT, False)
         item.setdefault("last_detected_reset", "")
@@ -195,7 +236,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     options[CONF_CONSUMABLES_LIST] = migrated_consumables
 
     migrated_accessories: list[dict] = []
-    for accessory in options.get(CONF_ACCESSORIES_LIST, []):
+    for accessory in safe_record_list(options.get(CONF_ACCESSORIES_LIST)):
         item = deepcopy(accessory)
         item_status = legacy_status(item)
         migrated_accessories.append(
@@ -228,6 +269,9 @@ def _register_services(hass: HomeAssistant) -> None:
     async def handle_renew(call: ServiceCall) -> None:
         await _handle_renew_service(hass, call)
 
+    async def handle_charge(call: ServiceCall) -> None:
+        await _handle_service_charge(hass, call)
+
     async def handle_replace(call: ServiceCall) -> None:
         await _handle_replace_consumable(hass, call)
 
@@ -241,6 +285,9 @@ def _register_services(hass: HomeAssistant) -> None:
         await _handle_legacy_quick_action(hass, call)
 
     hass.services.async_register(DOMAIN, SERVICE_RENEW, handle_renew, schema=RENEW_SCHEMA)
+    hass.services.async_register(
+        DOMAIN, SERVICE_RECORD_CHARGE, handle_charge, schema=SERVICE_CHARGE_SCHEMA
+    )
     hass.services.async_register(DOMAIN, SERVICE_REPLACE, handle_replace, schema=REPLACE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_SET_LIFECYCLE, handle_lifecycle, schema=LIFECYCLE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_UPDATE_IMAGE, handle_image, schema=IMAGE_SCHEMA)
@@ -285,6 +332,30 @@ async def _update_options(
         hass.config_entries.async_update_entry(latest, options=options)
 
 
+def _service_standard_months(options: dict) -> int:
+    """Return the configured renewal cycle in months."""
+    return max(
+        1,
+        safe_int(
+            options.get(CONF_SERVICE_PERIOD_MONTHS),
+            SUB_PERIOD_MONTHS.get(options.get(CONF_SUB_PERIOD), 1),
+        ),
+    )
+
+
+def _service_monthly_price(entry: ConfigEntry, options: dict) -> float:
+    """Return the monthly reference price, with a legacy-safe fallback."""
+    configured = max(0.0, safe_float(options.get(CONF_PLAN_MONTHLY_PRICE)))
+    if configured > 0:
+        return configured
+    period_months = _service_standard_months(options)
+    current_period = safe_float(
+        options.get(CONF_CURRENT_PERIOD_COST),
+        safe_float(entry.data.get(CONF_TOTAL_PRICE)),
+    )
+    return max(0.0, current_period / period_months)
+
+
 async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
     if infer_kind(dict(entry.data)) != KIND_SERVICE:
@@ -292,33 +363,116 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
 
     def mutate(options: dict) -> None:
         today = today_local()
-        price = max(
-            0.0,
-            safe_float(call.data.get("cost"), safe_float(entry.data.get(CONF_TOTAL_PRICE))),
-        )
-        options["accumulated_cost"] = safe_float(options.get("accumulated_cost")) + price
-
         explicit_expiration = safe_date(call.data.get(CONF_EXPIRATION_DATE))
+        if explicit_expiration and explicit_expiration <= today:
+            raise ServiceValidationError("新的到期日必须晚于今天")
+
+        requested_months = call.data.get("months")
+        if requested_months is None:
+            requested_months = SUB_PERIOD_MONTHS.get(
+                options.get(CONF_SUB_PERIOD, "1个月"), 1
+            )
+        coverage_months = max(1, int(requested_months))
+        period_start = today
         if explicit_expiration:
             new_expiration = explicit_expiration
+            period_days = max(1, (new_expiration - period_start).days)
+            if "months" not in call.data:
+                coverage_months = max(1, round(period_days / 30.4375))
         else:
-            months = call.data.get("months")
-            if months is None:
-                months = {
-                    "1个月": 1,
-                    "3个月": 3,
-                    "半年": 6,
-                    "1年": 12,
-                }.get(options.get(CONF_SUB_PERIOD, "1个月"), 1)
             current_expiration = safe_date(options.get(CONF_EXPIRATION_DATE), today)
-            base_date = current_expiration if current_expiration and current_expiration > today else today
-            new_expiration = add_months_to_date(base_date, int(months))
+            base_date = (
+                current_expiration
+                if current_expiration and current_expiration > today
+                else today
+            )
+            period_start = base_date
+            new_expiration = add_months_to_date(base_date, coverage_months)
+            period_days = max(1, (new_expiration - period_start).days)
 
+        monthly_price = _service_monthly_price(entry, options)
+        price = max(
+            0.0,
+            safe_float(
+                call.data.get("cost"), monthly_price * coverage_months
+            ),
+        )
+        options["accumulated_cost"] = safe_float(options.get("accumulated_cost")) + price
+        if safe_float(options.get(CONF_PLAN_MONTHLY_PRICE)) <= 0:
+            options[CONF_PLAN_MONTHLY_PRICE] = monthly_price
         options[CONF_EXPIRATION_DATE] = str(new_expiration)
         options[CONF_CURRENT_PERIOD_COST] = price
-        options["service_period_start"] = str(base_date if not explicit_expiration else today)
-        options["service_period_days"] = max(1, (new_expiration - (base_date if not explicit_expiration else today)).days)
+        options[CONF_SERVICE_PERIOD_MONTHS] = coverage_months
+        options["service_period_start"] = str(period_start)
+        options["service_period_days"] = period_days
+        payments = safe_record_list(options.get(CONF_SERVICE_PAYMENTS))
+        payments.append(
+            {
+                "id": f"payment_{uuid.uuid4().hex[:12]}",
+                "payment_type": "renewal",
+                "amount": price,
+                "paid_at": str(today),
+                "period_start": str(period_start),
+                "period_end": str(new_expiration),
+                "months_covered": coverage_months,
+                "description": "续订服务",
+            }
+        )
+        options[CONF_SERVICE_PAYMENTS] = payments
         options.update(normalize_status_record(options, STATUS_ACTIVE, changed_at=today))
+
+    await _update_options(hass, entry, mutate)
+
+
+async def _handle_service_charge(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Record a paid upgrade or extra quota without changing the expiry date."""
+    entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
+    if infer_kind(dict(entry.data)) != KIND_SERVICE:
+        raise ServiceValidationError("只有虚拟服务记录可以记录订阅附加支出")
+
+    charge_type = call.data["charge_type"]
+    if charge_type not in ("upgrade", "extra_quota", "other"):
+        raise ServiceValidationError("不支持的订阅附加支出类型")
+    if legacy_status(dict(entry.options)) == STATUS_CANCELED:
+        raise ServiceValidationError("服务已取消，请先续订后再记录附加支出")
+    expiration = safe_date(entry.options.get(CONF_EXPIRATION_DATE))
+    if expiration is not None and expiration < today_local():
+        raise ServiceValidationError("服务已到期，请先续订后再记录附加支出")
+    cost = max(0.0, safe_float(call.data.get("cost")))
+    description = str(call.data.get("description", "")).strip()
+    new_monthly_price = call.data.get("new_monthly_price")
+    if charge_type != "upgrade" and new_monthly_price is not None:
+        raise ServiceValidationError("只有升级订阅可以填写升级后的套餐月费")
+
+    def mutate(options: dict) -> None:
+        today = today_local()
+        period_start = today.replace(day=1)
+        month_end = add_months_to_date(period_start, 1) - timedelta(days=1)
+        expiration = safe_date(options.get(CONF_EXPIRATION_DATE))
+        period_end = (
+            min(expiration, month_end)
+            if expiration and expiration >= period_start
+            else month_end
+        )
+        charges = safe_record_list(options.get(CONF_SERVICE_CHARGES))
+        charges.append(
+            {
+                "id": f"charge_{uuid.uuid4().hex[:12]}",
+                "charge_type": charge_type,
+                "cost": cost,
+                "description": description,
+                "paid_at": str(today),
+                "period_start": str(period_start),
+                "period_end": str(period_end),
+            }
+        )
+        if charge_type == "upgrade" and new_monthly_price is not None:
+            options[CONF_PLAN_MONTHLY_PRICE] = max(
+                0.0, safe_float(new_monthly_price)
+            )
+            charges[-1]["new_monthly_price"] = options[CONF_PLAN_MONTHLY_PRICE]
+        options[CONF_SERVICE_CHARGES] = charges
+        options["accumulated_cost"] = safe_float(options.get("accumulated_cost")) + cost
 
     await _update_options(hass, entry, mutate)
 
