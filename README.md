@@ -2,8 +2,16 @@
 
 HomeAsset Companion 是一个 Home Assistant 自定义集成，用于记录家庭设备、家电、订阅服务、耗材、配件与纪念物品的生命周期。
 
-> 当前版本：**v1.2.0 订阅账期版**
+> 当前版本：**v1.3.0 账单与提醒版**
 > 最低建议 Home Assistant：**2026.6.0**
+
+## v1.3.0 主要变化
+
+- 提前续订会保留当前账期，下一期费用在覆盖起始日生效，累计投入仍在付款时增加。
+- 详情卡提供中文记账表单和可展开的账单明细，支持实际付款日期、续订覆盖月数、升级差价和额外额度。
+- 付款请求编号可防止同一笔付款重试造成重复记账；旧服务调用参数仍兼容。
+- 集成设置中可开启到期提醒，使用 HA 本地时区在 09:00 提前 7 天、3 天及到期当天发送站内通知；默认关闭。
+- 修复日历 UTC 查询窗口转换和非有限金额处理。
 
 ## v1.2.0 主要变化
 
@@ -66,8 +74,8 @@ custom_components/device_companion
 前往 **设置 → 仪表盘 → 右上角菜单 → 资源**，添加：
 
 ```text
-/device_companion/device-companion-card.js?v=1.2.0
-/device_companion/device-companion-summary.js?v=1.2.0
+/device_companion/device-companion-card.js?v=1.3.0
+/device_companion/device-companion-summary.js?v=1.3.0
 ```
 
 资源类型均选择 **JavaScript Module**。
@@ -96,7 +104,7 @@ exclude_entities: []
 
 升级前建议先创建 Home Assistant 备份。
 
-1. 用 v1.2.0 覆盖旧的 `custom_components/device_companion`。
+1. 用 v1.3.0 覆盖旧的 `custom_components/device_companion`。
 2. 在仪表盘资源中删除或停用旧资源：
 
 ```text
@@ -166,6 +174,16 @@ v1.1.0 提供：
 旧版 `device_companion.quick_action` 暂时保留，用于兼容旧自动化和旧卡片，后续大版本可能移除。
 
 订阅采用“先付款、后享受”的记账方式：`plan_monthly_price` 是套餐参考月费，`total_price` 是首次实际预付金额，`service_period_months` 是这笔预付覆盖的月数。比如月费 140 元、一次预付 280 元，应记录为覆盖 2 个月；不能因为到期日跨度看起来接近 3 个月就按 3 个月计算。每次续订支付写入累计投入并延长到期日。升级差价或额外额度使用 `record_service_charge` 单独记录，只增加已支付金额，不改变到期日；基础预付费用按覆盖月数折算，升级差价/额外额度则计入发生当月的一次性支出。升级可同时填写新的后续套餐月费，额外额度不应填写该字段。旧条目没有付款明细时不会凭空补记，并会显示为未追踪付款覆盖。
+
+## 账单与到期提醒
+
+详情卡点击“登记续订”或“记一笔”，填写实际已支付金额和付款日期，再确认记账。该操作只记录付款，不会向外部平台扣款。表单取消不会保存；连接中断时保留原表单，原样重试沿用同一请求编号。修改表单内容视为另一笔付款。旧自动化可继续调用服务，若要防止重试重复记账，请为每笔付款提供稳定且不同的 `request_id`。
+
+“账单明细”按实际付款日期倒序展示首次付款、续订和附加支出，续订显示覆盖期限。旧记录缺失的明细不会自动补造；首次付款仍沿用旧起算日期，不能视作独立核验过的实际支付日期。提前续订产生的旧账期快照只用于保持费用计算，不会伪装成历史付款明细。
+
+在 **设置 → 设备与服务 → HomeAsset Companion → 对应记录设置 → 修改基础资料** 中开启“到期提醒”。提醒使用 Home Assistant 站内通知；手机推送仍可通过现有日历配合 HA 自动化配置。重载/重启保留去重标记，09:00 后启动会补发当前最近的提醒阶段；取消或已过期的服务不再提醒，续订后的新到期日重新计算。
+
+新增字段保存在 `entry.options`：`service_period_snapshots`（旧账期计算快照）、`payment_requests`（付款重试凭据）、`expiry_reminders` 和 `expiry_reminder_sent`。现有 Config Entry schema 版本仍为 2，实体标识和已有付款 ID 不变。
 
 ## 智能耗材逻辑
 

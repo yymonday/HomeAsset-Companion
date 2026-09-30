@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 from datetime import timedelta
 import logging
+import math
 from pathlib import Path
 import uuid
 
@@ -76,20 +77,37 @@ SERVICE_UPDATE_IMAGE = "update_item_image"
 SERVICE_QUICK_ACTION = "quick_action"  # Backward compatibility for V153 cards.
 
 TARGET_SCHEMA = vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_id})
+
+
+def _finite_amount(value) -> float:
+    """Validate finite nonnegative service amounts before any write."""
+    try:
+        value = float(value)
+    except (ValueError, TypeError, OverflowError) as err:
+        raise vol.Invalid("金额必须是有限的非负数") from err
+    if not math.isfinite(value) or value < 0:
+        raise vol.Invalid("金额必须是有限的非负数")
+    return value
+
+
+PAYMENT_FIELDS = {
+    vol.Optional("request_id"): vol.All(cv.string, vol.Length(min=1, max=100)),
+    vol.Optional("paid_at"): cv.date,
+}
 RENEW_SCHEMA = TARGET_SCHEMA.extend(
     {
-        vol.Optional("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        **PAYMENT_FIELDS,
+        vol.Optional("cost"): _finite_amount,
         vol.Optional("months"): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         vol.Optional(CONF_EXPIRATION_DATE): cv.date,
     }
 )
 SERVICE_CHARGE_SCHEMA = TARGET_SCHEMA.extend(
     {
+        **PAYMENT_FIELDS,
         vol.Required("charge_type"): vol.In(("upgrade", "extra_quota", "other")),
-        vol.Required("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
-        vol.Optional("new_monthly_price"): vol.All(
-            vol.Coerce(float), vol.Range(min=0)
-        ),
+        vol.Required("cost"): _finite_amount,
+        vol.Optional("new_monthly_price"): _finite_amount,
         vol.Optional("description", default=""): vol.All(
             cv.string, vol.Length(max=200)
         ),
@@ -98,7 +116,7 @@ SERVICE_CHARGE_SCHEMA = TARGET_SCHEMA.extend(
 REPLACE_SCHEMA = TARGET_SCHEMA.extend(
     {
         vol.Required("cons_id"): cv.string,
-        vol.Optional("cost"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional("cost"): _finite_amount,
     }
 )
 LIFECYCLE_SCHEMA = TARGET_SCHEMA.extend(
@@ -157,6 +175,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up HomeAsset Companion from a config entry."""
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    from .reminders import async_setup_reminders
+
+    async_setup_reminders(hass, entry)
     return True
 
 
@@ -168,9 +189,13 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        hass.data.get(DOMAIN, {}).get(DATA_LOCKS, {}).pop(entry.entry_id, None)
+    # Keep locks across reloads: queued writes must share the same lock.
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Release the shared write lock only when the record is deleted."""
+    hass.data.get(DOMAIN, {}).get(DATA_LOCKS, {}).pop(entry.entry_id, None)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -356,13 +381,43 @@ def _service_monthly_price(entry: ConfigEntry, options: dict) -> float:
     return max(0.0, current_period / period_months)
 
 
+def _payment_request(options: dict, call: ServiceCall, action: str) -> bool:
+    """Persist retry receipts, rejecting reuse with different payloads."""
+    request_id = call.data.get("request_id")
+    if not request_id:
+        return True
+    payload = {key: str(value) for key, value in call.data.items() if key != "request_id"}
+    receipts = safe_record_list(options.get("payment_requests"))
+    for receipt in receipts:
+        if receipt.get("id") == request_id:
+            if receipt.get("action") != action or receipt.get("payload") != payload:
+                raise ServiceValidationError("该请求编号已用于另一笔付款")
+            return False
+    options["payment_requests"] = receipts + [
+        {"id": request_id, "action": action, "payload": payload}
+    ]
+    return True
+
+
+def _paid_date(call, today):
+    paid = safe_date(call.data.get("paid_at"), today)
+    if paid > today:
+        raise ServiceValidationError("付款日期不能晚于今天")
+    return paid
+
+
 async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
     if infer_kind(dict(entry.data)) != KIND_SERVICE:
         raise ServiceValidationError("只有虚拟服务记录可以续订")
 
     def mutate(options: dict) -> None:
+        if not _payment_request(options, call, SERVICE_RENEW):
+            return False
         today = today_local()
+        paid_at = _paid_date(call, today)
+        if paid_at < safe_date(entry.data.get("purchase_date"), paid_at):
+            raise ServiceValidationError("付款日期不能早于服务起始日期")
         explicit_expiration = safe_date(call.data.get(CONF_EXPIRATION_DATE))
         if explicit_expiration and explicit_expiration <= today:
             raise ServiceValidationError("新的到期日必须晚于今天")
@@ -377,8 +432,7 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
         if explicit_expiration:
             new_expiration = explicit_expiration
             period_days = max(1, (new_expiration - period_start).days)
-            if "months" not in call.data:
-                coverage_months = max(1, round(period_days / 30.4375))
+            # The date does not prove how many months the payment purchased.
         else:
             current_expiration = safe_date(options.get(CONF_EXPIRATION_DATE), today)
             base_date = (
@@ -397,6 +451,26 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
                 call.data.get("cost"), monthly_price * coverage_months
             ),
         )
+        if period_start > today:
+            snapshots = safe_record_list(options.get("service_period_snapshots"))
+            old_start = safe_date(
+                options.get("service_period_start"),
+                safe_date(entry.data.get("purchase_date"), today),
+            )
+            old_end = safe_date(options.get(CONF_EXPIRATION_DATE))
+            if old_end and not any(item.get("period_start") == str(old_start) for item in snapshots):
+                snapshots.append(
+                    {
+                        "period_start": str(old_start),
+                        "period_end": str(old_end),
+                        "amount": safe_float(
+                            options.get(CONF_CURRENT_PERIOD_COST),
+                            safe_float(entry.data.get(CONF_TOTAL_PRICE)),
+                        ),
+                        "months_covered": _service_standard_months(options),
+                    }
+                )
+                options["service_period_snapshots"] = snapshots
         options["accumulated_cost"] = safe_float(options.get("accumulated_cost")) + price
         if safe_float(options.get(CONF_PLAN_MONTHLY_PRICE)) <= 0:
             options[CONF_PLAN_MONTHLY_PRICE] = monthly_price
@@ -411,7 +485,7 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
                 "id": f"payment_{uuid.uuid4().hex[:12]}",
                 "payment_type": "renewal",
                 "amount": price,
-                "paid_at": str(today),
+                "paid_at": str(paid_at),
                 "period_start": str(period_start),
                 "period_end": str(new_expiration),
                 "months_covered": coverage_months,
@@ -433,11 +507,6 @@ async def _handle_service_charge(hass: HomeAssistant, call: ServiceCall) -> None
     charge_type = call.data["charge_type"]
     if charge_type not in ("upgrade", "extra_quota", "other"):
         raise ServiceValidationError("不支持的订阅附加支出类型")
-    if legacy_status(dict(entry.options)) == STATUS_CANCELED:
-        raise ServiceValidationError("服务已取消，请先续订后再记录附加支出")
-    expiration = safe_date(entry.options.get(CONF_EXPIRATION_DATE))
-    if expiration is not None and expiration < today_local():
-        raise ServiceValidationError("服务已到期，请先续订后再记录附加支出")
     cost = max(0.0, safe_float(call.data.get("cost")))
     description = str(call.data.get("description", "")).strip()
     new_monthly_price = call.data.get("new_monthly_price")
@@ -445,8 +514,19 @@ async def _handle_service_charge(hass: HomeAssistant, call: ServiceCall) -> None
         raise ServiceValidationError("只有升级订阅可以填写升级后的套餐月费")
 
     def mutate(options: dict) -> None:
+        if not _payment_request(options, call, SERVICE_RECORD_CHARGE):
+            return False
         today = today_local()
-        period_start = today.replace(day=1)
+        # Revalidate inside the lock, after any concurrent lifecycle update.
+        expiration = safe_date(options.get(CONF_EXPIRATION_DATE))
+        if legacy_status(options) == STATUS_CANCELED:
+            raise ServiceValidationError("服务已取消，请先续订后再记录附加支出")
+        if expiration and expiration < today:
+            raise ServiceValidationError("服务已到期，请先续订后再记录附加支出")
+        paid_at = _paid_date(call, today)
+        if paid_at < safe_date(entry.data.get("purchase_date"), paid_at):
+            raise ServiceValidationError("付款日期不能早于服务起始日期")
+        period_start = paid_at.replace(day=1)
         month_end = add_months_to_date(period_start, 1) - timedelta(days=1)
         expiration = safe_date(options.get(CONF_EXPIRATION_DATE))
         period_end = (
@@ -461,7 +541,7 @@ async def _handle_service_charge(hass: HomeAssistant, call: ServiceCall) -> None
                 "charge_type": charge_type,
                 "cost": cost,
                 "description": description,
-                "paid_at": str(today),
+                "paid_at": str(paid_at),
                 "period_start": str(period_start),
                 "period_end": str(period_end),
             }

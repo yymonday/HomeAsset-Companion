@@ -8,6 +8,7 @@ import logging
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -171,4 +172,8 @@ class DeviceCompanionCalendar(CalendarEntity):
         start_date: datetime,
         end_date: datetime,
     ) -> list[CalendarEvent]:
-        return self._build_events(start_date.date(), end_date.date())
+        start = dt_util.as_local(start_date)
+        end = dt_util.as_local(end_date)
+        # Include a partially queried final day, but retain an exclusive midnight.
+        view_end = end.date() if end.time() == datetime.min.time() else end.date() + timedelta(days=1)
+        return self._build_events(start.date(), view_end)

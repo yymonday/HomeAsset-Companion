@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import math
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Any
@@ -39,8 +40,9 @@ def today_local() -> date:
 def safe_float(value: Any, default: float = 0.0) -> float:
     """Convert a value to float without raising."""
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+        return result if math.isfinite(result) else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -48,7 +50,7 @@ def safe_int(value: Any, default: int = 0) -> int:
     """Convert a value to int without raising."""
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

@@ -2,6 +2,16 @@ renew_service:
   name: 续订服务
   description: 为虚拟服务增加一期费用并延长到期日。
   fields:
+    request_id:
+      name: 付款请求编号
+      description: 同一笔付款重试请沿用相同编号，避免重复记账；编号不可用于不同付款。
+      selector:
+        text:
+    paid_at:
+      name: 实际付款日期
+      description: 留空使用今天，不能填写未来日期或早于服务起始日期。
+      selector:
+        date:
     entity_id:
       name: 陪伴实体
       description: HomeAsset Companion 主传感器实体。
@@ -41,6 +51,16 @@ record_service_charge:
   name: 记录订阅附加支出
   description: 记录升级差价或本期额外额度费用，不改变服务到期日。
   fields:
+    request_id:
+      name: 付款请求编号
+      description: 同一笔付款重试请沿用相同编号。
+      selector:
+        text:
+    paid_at:
+      name: 实际付款日期
+      description: 补记历史付款时填写实际日期，追加费用计入该自然月。
+      selector:
+        date:
     entity_id:
       name: 陪伴实体
       description: HomeAsset Companion 主传感器实体。

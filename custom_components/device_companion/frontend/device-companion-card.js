@@ -1,5 +1,5 @@
 /**
- * HomeAsset Companion Detail Card v1.2.0
+ * HomeAsset Companion Detail Card v1.3.0
  * Compatible with legacy V153 entities and the V2 lifecycle schema.
  */
 
@@ -115,6 +115,22 @@ class DeviceCompanionCard extends HTMLElement {
         .action-btn-outline:hover { background: var(--dc-theme); color: white; }
         .inline-input-wrap { display: none; gap: 4px; align-items: center; }
         .inline-input-wrap input { width: 45px; padding: 2px 4px; border: 1px solid var(--dc-theme); border-radius: 4px; background: transparent; color: var(--dc-text-main); font-size: 0.75rem; text-align: center; outline: none; }
+        .payment-panel { margin-top:16px; padding:14px; border:1px solid var(--divider-color,#ddd); border-radius:12px; }
+        [hidden] { display:none !important; }
+        .payment-panel label { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; font-size:.85rem; }
+        .payment-panel input,.payment-panel select { box-sizing:border-box; width:100%; min-height:42px; padding:8px; background:var(--dc-bg-color); color:var(--dc-text-main); border:1px solid var(--divider-color,#bbb); border-radius:6px; font:inherit; }
+        .payment-actions { display:flex; gap:12px; flex-wrap:wrap; }
+        .payment-actions button { min-height:40px; padding:8px 14px; }
+        button:disabled { opacity:.55; cursor:wait; }
+        .action-btn-outline { white-space:nowrap; }
+        #service-progress-container .progress-header { flex-wrap:wrap; gap:8px; }
+        #service-progress-container .progress-header > div { flex-wrap:wrap; }
+        #service-remain-text { white-space:nowrap; }
+        #payment-status { font-size:.85rem; margin-top:10px; overflow-wrap:anywhere; }
+        #bill-history { margin-top:16px; font-size:.85rem; }
+        #bill-history summary { cursor:pointer; padding:10px 0; }
+        .bill-row { padding:10px 0; border-bottom:1px solid var(--divider-color,#ddd); overflow-wrap:anywhere; }
+        .bill-row small { display:block; color:var(--dc-text-sub); margin-top:4px; }
       </style>
 
       <ha-card id="main-card">
@@ -158,11 +174,24 @@ class DeviceCompanionCard extends HTMLElement {
                 <div style="display:flex; gap:8px; align-items:center;">
                     <span id="service-remain-text">...</span>
                     <button class="action-btn-outline" id="btn-record-service-charge" style="display:none;"><ha-icon icon="mdi:cash-plus" style="--mdc-icon-size:12px; margin-right:2px;"></ha-icon>记一笔</button>
-                    <button class="action-btn-outline" id="btn-renew-service" style="display:none;"><ha-icon icon="mdi:refresh" style="--mdc-icon-size:12px; margin-right:2px;"></ha-icon>一键续订</button>
+                    <button class="action-btn-outline" id="btn-renew-service" style="display:none;"><ha-icon icon="mdi:refresh" style="--mdc-icon-size:12px; margin-right:2px;"></ha-icon>登记续订</button>
                 </div>
             </div>
             <div class="progress-bar-bg"><div class="progress-bar-fill" id="service-fill"></div></div>
           </div>
+
+          <form id="payment-form" class="payment-panel" hidden>
+            <label>付款类型<select name="charge_type"><option value="renewal">续订付款</option><option value="extra_quota">额外额度</option><option value="upgrade">升级差价</option><option value="other">其他附加支出</option></select></label>
+            <label>实际已支付金额（元）<input name="cost" type="number" min="0" step="0.01" required inputmode="decimal"></label>
+            <label>实际付款日期<input name="paid_at" type="date" required></label>
+            <label id="payment-months">本次覆盖月数<input name="months" type="number" min="1" max="120" step="1" value="1"></label>
+            <label id="payment-monthly" hidden>升级后套餐月费（可选，仅影响后续续订）<input name="new_monthly_price" type="number" min="0" step="0.01" inputmode="decimal"></label>
+            <label id="payment-description">说明<input name="description" maxlength="200" placeholder="套餐、额度或账单备注"></label>
+            <p>此操作只登记已经支付的款项，不会向订阅平台付款。</p>
+            <div class="payment-actions"><button type="submit" class="action-btn-outline">确认记账</button><button type="button" id="payment-cancel" class="action-btn-outline">取消</button></div>
+          </form>
+          <div id="payment-status" role="status" aria-live="polite"></div>
+          <details id="bill-history" hidden><summary>账单明细</summary><div id="bill-rows"></div></details>
 
           <div id="consumables-container"></div>
           <div id="accessories-container" class="accessories-grid"></div>
@@ -175,43 +204,67 @@ class DeviceCompanionCard extends HTMLElement {
 
     const shadowRoot = this.content;
     shadowRoot.getElementById("btn-renew-service").addEventListener("click", () => {
-      const price = dcNumber(this._lastAttrs?.renewal_price ?? this._lastAttrs?.total_price);
-      const expiration = this._lastAttrs?.expiration_date || "当前到期日";
-      const confirmed = window.confirm(`确认按原周期续订？\n当前到期：${expiration}\n本次预计费用：￥${price.toFixed(2)}`);
-      if (confirmed) this._callAction("renew_service");
+      this._openPayment("renewal");
     });
     shadowRoot.getElementById("btn-record-service-charge").addEventListener("click", () => {
-      const rawCost = window.prompt("输入已经支付的升级差价或额外额度金额", "");
-      if (rawCost === null) return;
-      const cost = Number(rawCost);
-      if (!Number.isFinite(cost) || cost < 0) {
-        window.alert("金额必须是大于或等于 0 的数字。");
-        return;
+      this._openPayment("extra_quota");
+    });
+    const form = shadowRoot.getElementById("payment-form");
+    form.elements.charge_type.addEventListener("change", () => this._paymentTypeChanged());
+    form.elements.months.addEventListener("change", () => {
+      if (form.elements.charge_type.value === "renewal") form.elements.cost.value = (dcNumber(this._lastAttrs?.plan_monthly_price) * Number(form.elements.months.value)).toFixed(2);
+    });
+    shadowRoot.getElementById("payment-cancel").addEventListener("click", () => { if (!this._busy) form.hidden = true; });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (this._busy || !form.reportValidity()) return;
+      const type = form.elements.charge_type.value;
+      const payload = { cost: Number(form.elements.cost.value), paid_at: form.elements.paid_at.value };
+      const action = type === "renewal" ? "renew_service" : "record_service_charge";
+      if (type === "renewal") payload.months = Number(form.elements.months.value);
+      else {
+        payload.charge_type = type;
+        payload.description = form.elements.description.value.trim();
+        if (type === "upgrade" && form.elements.new_monthly_price.value.trim()) payload.new_monthly_price = Number(form.elements.new_monthly_price.value);
       }
-      const rawType = window.prompt("类型：upgrade / extra_quota / other", "extra_quota");
-      const charge_type = ["upgrade", "extra_quota", "other"].includes(rawType) ? rawType : "extra_quota";
-      const description = window.prompt("备注（可选）", "本期额外支出") ?? "";
-      const payload = { charge_type, cost, description };
-      if (charge_type === "upgrade") {
-        const rawMonthlyPrice = window.prompt(
-          "升级后套餐月费（留空表示只记录差价，不改变后续续订月费）",
-          dcNumber(this._lastAttrs?.plan_monthly_price).toFixed(2),
-        );
-        if (rawMonthlyPrice === null) return;
-        if (String(rawMonthlyPrice).trim() !== "") {
-          const new_monthly_price = Number(rawMonthlyPrice);
-          if (!Number.isFinite(new_monthly_price) || new_monthly_price < 0) {
-            window.alert("升级后的套餐月费必须是大于或等于 0 的数字。");
-            return;
-          }
-          payload.new_monthly_price = new_monthly_price;
-        }
+      const signature = JSON.stringify({ action, payload });
+      if (signature !== this._paymentSignature) {
+        this._paymentSignature = signature;
+        this._paymentRequest = globalThis.crypto?.randomUUID?.() || `payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       }
-      this._callAction("record_service_charge", payload);
+      payload.request_id = this._paymentRequest;
+      if (await this._callAction(action, payload)) { form.hidden = true; this._paymentSignature = null; }
     });
   }
 
-  _callAction(action, data = {}) {
+  _openPayment(type) {
+    if (this._busy) return;
+    const form = this.content.getElementById("payment-form");
+    form.reset();
+    form.elements.charge_type.value = type;
+    form.elements.cost.value = type === "renewal" ? dcNumber(this._lastAttrs?.renewal_price).toFixed(2) : "";
+    form.elements.months.value = this._lastAttrs?.renewal_months || 1;
+    form.elements.paid_at.value = this._lastAttrs?.today || new Date().toLocaleDateString("en-CA");
+    form.elements.paid_at.max = form.elements.paid_at.value;
+    form.elements.paid_at.min = this._lastAttrs?.purchase_date || "";
+    form.hidden = false;
+    this._paymentTypeChanged();
+    this.content.getElementById("payment-status").textContent = "";
+    form.elements.cost.focus();
+  }
+
+  _paymentTypeChanged() {
+    const form = this.content.getElementById("payment-form");
+    const renewal = form.elements.charge_type.value === "renewal";
+    this.content.getElementById("payment-months").hidden = !renewal;
+    this.content.getElementById("payment-monthly").hidden = form.elements.charge_type.value !== "upgrade";
+    this.content.getElementById("payment-description").hidden = renewal;
+    form.elements.months.disabled = !renewal;
+    form.elements.months.required = renewal;
+    form.elements.new_monthly_price.disabled = form.elements.charge_type.value !== "upgrade";
+  }
+
+  async _callAction(action, data = {}) {
     const services = {
       renew_service: "renew_service",
       record_service_charge: "record_service_charge",
@@ -219,14 +272,26 @@ class DeviceCompanionCard extends HTMLElement {
       set_lifecycle: "set_lifecycle",
     };
     const service = services[action];
-    if (!service || !this.config?.entity) return;
-    Promise.resolve(this._hass.callService("device_companion", service, {
+    if (!service || !this.config?.entity || this._busy) return false;
+    this._busy = true;
+    const status = this.content.getElementById("payment-status");
+    status.textContent = "正在保存…";
+    this.content.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    try {
+      await this._hass.callService("device_companion", service, {
       entity_id: this.config.entity,
       ...data,
-    })).catch((error) => {
+      });
+      status.textContent = "已保存。账单将在实体更新后显示。";
+      return true;
+    } catch (error) {
       console.error("HomeAsset Companion service call failed", error);
-      window.alert("操作失败，请检查 Home Assistant 日志或服务参数。");
-    });
+      status.textContent = `保存未确认：${error?.message || "请检查连接后重试"}。原表单已保留，重试同一笔不会重复记账。`;
+      return false;
+    } finally {
+      this._busy = false;
+      this.content.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+    }
   }
 
   updateData() {
@@ -247,6 +312,15 @@ class DeviceCompanionCard extends HTMLElement {
     const state = stateObj.state;
     const kind = attrs.kind || (attrs.category === "虚拟服务" ? "service" : attrs.category === "纪念珍藏" ? "memorial" : "asset");
     const isService = kind === "service";
+    shadow.getElementById("bill-history").hidden = !isService;
+    if (isService) {
+      const labels = { initial: "首次付款", renewal: "续订付款", upgrade: "升级差价", extra_quota: "额外额度", other: "其他支出" };
+      const bills = [
+        ...(Array.isArray(attrs.service_payments) ? attrs.service_payments : []).filter((bill) => bill && typeof bill === "object").map((bill) => ({ ...bill, type: bill.payment_type, amount: bill.amount, coverage: true })),
+        ...(Array.isArray(attrs.service_charges) ? attrs.service_charges : []).filter((bill) => bill && typeof bill === "object").map((bill) => ({ ...bill, type: bill.charge_type, amount: bill.cost, coverage: false })),
+      ].filter((bill) => bill && typeof bill === "object").sort((a,b) => String(b.paid_at || "").localeCompare(String(a.paid_at || "")));
+      shadow.getElementById("bill-rows").innerHTML = `<p>到期提醒：${attrs.expiry_reminders ? "已开启（7 天、3 天、当天）" : "未开启，可在集成设置中开启"}</p>` + (bills.length ? bills.map((bill) => `<div class="bill-row">${dcEscape(bill.paid_at || "日期未记录")} · ${dcEscape(labels[bill.type] || "付款")} · ￥${dcNumber(bill.amount).toFixed(2)}${bill.coverage ? `<small>覆盖 ${dcEscape(bill.period_start)} 至 ${dcEscape(bill.period_end)} · ${dcNumber(bill.months_covered)} 个月</small>` : ""}${bill.description ? `<small>${dcEscape(bill.description)}</small>` : ""}</div>`).join("") : "<p>尚无付款明细。旧记录的累计投入保留，不会自动补造历史账单。</p>");
+    }
     const isMemorial = kind === "memorial";
     const isEvent = kind === "event" || attrs.is_event === true;
     const terminalStatuses = new Set(["archived", "sold", "scrapped", "lost", "gifted", "canceled", "expired"]);
@@ -687,6 +761,6 @@ if (!window.customCards.some((card) => card.type === "device-companion-card")) {
     type: "device-companion-card",
     name: "HomeAsset Companion 详情卡",
     preview: true,
-    description: "v1.2.0：统一生命周期状态、预付账期口径与显式服务调用。"
+    description: "v1.3.0：账单明细、中文记账表单与到期提醒。"
   });
 }

@@ -642,6 +642,23 @@ class DeviceCompanionSensor(SensorEntity):
             service_period_start = safe_date(
                 options.get("service_period_start"), purchase_date
             )
+            active_period_end = expiration_date
+            periods = safe_record_list(options.get(CONF_SERVICE_PAYMENTS)) + safe_record_list(options.get("service_period_snapshots"))
+            active_periods = [
+                period for period in periods
+                if (start := safe_date(period.get("period_start"))) is not None
+                and (end := safe_date(period.get("period_end"))) is not None
+                and start <= today <= end
+                and safe_int(period.get("months_covered")) > 0
+            ]
+            if active_periods:
+                active_period = max(active_periods, key=lambda period: safe_date(period.get("period_start")))
+                current_period_cost = max(0.0, safe_float(active_period.get("amount")))
+                service_period_months = safe_int(active_period.get("months_covered"), 1)
+                service_period_start = safe_date(active_period.get("period_start"))
+                active_period_end = safe_date(active_period.get("period_end"))
+            elif periods and service_period_start > today:
+                current_period_cost = 0.0
             for charge in safe_record_list(options.get(CONF_SERVICE_CHARGES)):
                 charge_start = safe_date(charge.get("period_start"))
                 charge_end = safe_date(charge.get("period_end"))
@@ -657,7 +674,7 @@ class DeviceCompanionSensor(SensorEntity):
                 if charge_start <= today <= charge_end:
                     current_month_extra_cost += charge_cost
                 if charge_start <= today and charge_end >= service_period_start and (
-                    expiration_date is None or charge_start <= expiration_date
+                    active_period_end is None or charge_start <= active_period_end
                 ):
                     current_period_extra_cost += charge_cost
             payment_ends = [
@@ -709,6 +726,7 @@ class DeviceCompanionSensor(SensorEntity):
             service_remain_days = remaining_days
 
         attrs: dict[str, Any] = {
+            "today": str(today),
             "integration_domain": DOMAIN,
             "friendly_name": self._device_name,
             "kind": kind,
@@ -749,6 +767,10 @@ class DeviceCompanionSensor(SensorEntity):
             "current_period_total_cost": round(current_period_total_cost, 2),
             "plan_monthly_price": round(plan_monthly_price, 2),
             "service_period_months": service_period_months,
+            "current_period_start": str(service_period_start) if kind == KIND_SERVICE else "",
+            "current_period_end": str(active_period_end) if kind == KIND_SERVICE and active_period_end else "",
+            "expiry_reminders": bool(options.get("expiry_reminders", False)),
+            "renewal_months": SUB_PERIOD_MONTHS.get(options.get(CONF_SUB_PERIOD), 1),
             "payment_coverage_end": (
                 str(payment_coverage_end) if payment_coverage_end else ""
             ),

@@ -104,6 +104,7 @@
           "purchase_date": "起始日期",
           "total_price": "主体金额或初始付款",
           "sync_to_calendar": "同步到 Home Assistant 日历",
+          "expiry_reminders": "到期提醒（提前 7 天、3 天及当天，09:00）",
           "sub_period": "续订周期",
           "plan_monthly_price": "套餐月费（参考）",
           "service_period_months": "当前付款覆盖月数",

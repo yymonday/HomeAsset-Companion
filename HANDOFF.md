@@ -1,6 +1,6 @@
 # HomeAsset Companion 项目交接
 
-> 交接基线：v1.2.0 订阅账期版
+> 交接基线：v1.3.0 账单与提醒版
 > 远端仓库：<https://github.com/yymonday/HomeAsset-Companion>
 
 ## 项目简介
@@ -9,9 +9,9 @@
 
 ## 当前版本与功能完成度
 
-- 当前版本：`1.2.0`，Config Flow schema version `2`。
+- 当前版本：`1.3.0`，Config Flow schema version `2`。
 - 已完成：四种稳定业务类型、Config/Options Flow、生命周期状态、分期计算、耗材与配件、智能耗材监听、续订/换新/生命周期/图片服务、旧 `quick_action` 兼容层、日历、前端详情卡与汇总卡、认证图片上传、V1 → V2 迁移。
-- 完成度：核心功能可用，当前阶段属于 v1.2.0 订阅账期维护，不进行 2.0 交易流水或 Subentry 重构。
+- 完成度：当前阶段为 v1.3.0 账单与提醒版本，未引入 2.0 交易流水或 Subentry 重构。
 
 ## 目录结构
 
@@ -47,7 +47,7 @@ Config Flow / Options Flow
 
 ## 关键实现与持久化
 
-- `__init__.py` 在集成 setup 注册共享 HTTP 路由和服务，在 entry setup 只转发 sensor/calendar 平台；`async_unload_entry` 负责平台卸载和 entry 锁清理。
+- `__init__.py` 在集成 setup 注册共享 HTTP 路由和服务，在 entry setup 转发 sensor/calendar 平台并注册可选提醒；卸载释放平台和监听，写锁跨 reload 保留，删除记录时清理。
 - `async_migrate_entry` 将 V1 旧字段推导为 `kind`、schema version 2、标准生命周期字段和服务周期字段；服务还会补齐 `current_period_cost`，默认保持原始总价。
 - `plan_monthly_price`、`service_period_months` 和 `current_period_cost` 位于 `entry.options`：前者是参考月费，中者是当前实际预付覆盖月数，后者是当前周期实际基础付款。传感器按 `current_period_cost / service_period_months` 计算基础月费，不再从到期日跨度猜测 140 元/月或 280 元覆盖几个月。
 - `service_payments` 位于 `entry.options`，新建和续订会记录付款类型、实际金额、付款覆盖起止日和覆盖月数。旧条目不伪造历史明细；若付款覆盖结束日早于仍有效的到期日，传感器会给出“付款覆盖需核对”提示。
@@ -72,7 +72,7 @@ Config Flow / Options Flow
 
 ## 当前已知问题与风险
 
-- 自动测试已接入真实 Home Assistant fixture，并覆盖 Config Entry setup、实体注册、服务调用和 reload/unload；完整 Config Flow、HTTP 上传、Device Registry 及用户实际环境仍需人工验证。
+- 自动测试已接入真实 Home Assistant fixture，覆盖 Config/Options Flow、Config Entry setup、实体注册、HTTP 上传、服务调用和 reload/unload；用户实际环境中的卡片、Device Registry 展示、通知及完整重启仍需安装后验证。
 - 多 Config Entry 测试已确认不同条目的实体互不冲突，卸载一个条目后共享服务和其他条目仍可正常工作。
 - 上传接口已通过真实 HA HTTP 测试，覆盖认证配置、签名、大小限制、磁盘异常、随机文件名和实际落盘；孤立文件清理仍待处理。
 - `safe_date`/`safe_float` 为兼容旧数据保留默认回退；如果用户数据损坏，可能只能看到默认值，需要后续增加诊断日志而不能直接改变历史口径。列表型旧数据现在会安全过滤非法记录。
@@ -95,6 +95,16 @@ node --check custom_components/device_companion/frontend/device-companion-summar
 GitHub Actions 还会执行 Hassfest 和 HACS 校验。测试依赖使用 `pytest-homeassistant-custom-component` 提供 Home Assistant 测试运行时。
 
 ## 下一阶段建议
+
+### v1.3.0 实现与验收
+
+- 稳定性：提前续订按当前日期选择付款覆盖账期，首次提前续订保留旧账期计算快照；锁跨 reload 保留，付款请求编号在 options 持久化去重；日期按 HA 时区转换，服务金额拒绝非有限数值。
+- 体验：详情卡中文付款表单、实际付款日期和账单明细，处理中禁用按钮，失败保留表单和同一请求编号；取消不保存。
+- 提醒：`reminders.py` 在开启后注册本地 09:00 监听，提前 7 天、3 天及到期日创建站内通知；去重标记存入 options，卸载取消监听和待执行任务。
+- 新 options：`service_period_snapshots`、`payment_requests`、`expiry_reminders`、`expiry_reminder_sent`。不修改旧字段或实体 ID，不伪造旧付款。旧无请求编号的服务调用保留原行为。
+- 已验证：真实 Config/Options Flow、实体标识保持、付款并发重试、提前多期续订、补记付款月份、非有限金额、月末/闰年及日历时区边界、提醒去重；本地卡片模拟页面用于浏览器验收。
+- 本轮最终全量回归：55 passed；Python、两张卡片、JSON/YAML 与 diff 检查通过。内置浏览器验证 390px 手机布局、升级字段、取消不保存及保存后连接中断的同笔重试；临时预览服务已停止。
+- 用户实际 HA 的卡片更新、站内提醒展示、重启与手机通知仍需安装后验收。发布前再次全量回归 55 passed；生产安装与实机验收状态见 `docs/ACCEPTANCE_v1.3.0.md`。
 
 1. 由用户在实际 HA 中验证 V1 条目迁移、旧 quick_action 续订、续订后的当前月均费用、重载/重启和日历。
 2. 在实际 HA 中验证完整 Config Flow、Device Registry、上传界面和智能耗材通知展示。

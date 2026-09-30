@@ -567,6 +567,7 @@ class DeviceCompanionOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                 )
             for key in (
+                "expiry_reminders",
                 CONF_SUB_PERIOD,
                 CONF_EXPIRATION_DATE,
                 "anniversary_name",
@@ -636,6 +637,7 @@ class DeviceCompanionOptionsFlowHandler(config_entries.OptionsFlow):
             ] = vol.All(vol.Coerce(float), vol.Range(min=0))
 
         if kind == KIND_SERVICE:
+            schema[vol.Optional("expiry_reminders", default=options.get("expiry_reminders", False))] = bool
             schema[
                 vol.Required(
                     CONF_SUB_PERIOD,

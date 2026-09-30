@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HomeAsset v1.3 本地验证</title>
+<style>body{margin:20px;background:#eee;color:#333;font:16px system-ui}main{max-width:420px;margin:auto}#calls{overflow-wrap:anywhere}button{padding:10px}device-companion-card{display:block;margin:16px 0}</style>
+<main><p>本地模拟验证，不连接实际 Home Assistant。</p><button id="fail">模拟保存后连接中断一次</button><p id="calls">已记账 0 笔</p><device-companion-card></device-companion-card></main>
+<script type="module">
+import '/custom_components/device_companion/frontend/device-companion-card.js';
+const card=document.querySelector('device-companion-card');
+const attrs={integration_domain:'device_companion',friendly_name:'ChatGPT Plus',kind:'service',category:'虚拟服务',today:'2026-09-30',purchase_date:'2026-09-12',expiration_date:'2026-11-12',status:'active',stored_status:'active',current_period_cost:280,service_period_months:2,plan_monthly_price:140,renewal_price:140,renewal_months:1,current_period_total_cost:280,current_period_base_monthly_cost:140,current_monthly_cost:140,service_percent:70,service_remain_days:43,payment_coverage_status:'ok',expiry_reminders:true,service_payments:[{id:'first',payment_type:'initial',amount:280,paid_at:'2026-09-12',period_start:'2026-09-12',period_end:'2026-11-12',months_covered:2,description:'首次预付'}],service_charges:[],consumables_list:[],accessories_list:[],badges:[]};
+let fail=false;
+const receipts=new Map();
+document.querySelector('#fail').onclick=()=>{fail=true;};
+const hass={states:{'sensor.preview':{state:'18',attributes:attrs}},callService:async (_domain,service,payload)=>{
+  if(!receipts.has(payload.request_id)){
+    receipts.set(payload.request_id,{service,payload});
+    if(service==='record_service_charge')attrs.service_charges.push({id:payload.request_id,charge_type:payload.charge_type,cost:payload.cost,paid_at:payload.paid_at,description:payload.description});
+    else attrs.service_payments.push({id:payload.request_id,payment_type:'renewal',amount:payload.cost,paid_at:payload.paid_at,period_start:'2026-11-12',period_end:'2026-12-12',months_covered:payload.months});
+  }
+  document.querySelector('#calls').textContent=`已记账 ${receipts.size} 笔`;
+  card.hass=hass;
+  if(fail){fail=false;throw new Error('模拟保存后连接中断');}
+}};
+card.setConfig({entity:'sensor.preview'});card.hass=hass;
+</script>
+</html>
