@@ -18,7 +18,9 @@
 - 用户明确确认“已经验收，可以发布”，实机验收阶段关闭；该结论来自用户确认，不是本轮重新运行实机写入测试。
 - 正式版本统一为 `1.4.0`，升级资源使用 `?v=1.4.0`。发布说明见 [RELEASE_v1.4.0.md](docs/RELEASE_v1.4.0.md)。
 - 发布前复核：76 项 Python、11 项前端测试全部通过，Python/前端语法、JSON/YAML、版本一致性与 diff 检查通过。
-- 发布执行顺序：本地检查 → 提交并推送 main → GitHub Validate 成功 → 标签与正式 Release → 核对远端提交、标签和发布源码。
+- 发布已完成：[v1.4.0 正式 Release](https://github.com/yymonday/HomeAsset-Companion/releases/tag/v1.4.0)，GitHub latest 已确认，非草稿、非预发布；发布提交 `6116f17ebe36c5e796fc46d47e1dae952b22de2f`，标签指向同一提交。
+- 主分支 Validate [37038915679](https://github.com/yymonday/HomeAsset-Companion/actions/runs/37038915679) 与标签 Validate [37039249964](https://github.com/yymonday/HomeAsset-Companion/actions/runs/37039249964) 全部成功，包含 Hassfest、HACS、语法与测试。
+- GitHub 发布源码包 14 个集成文件与标签逐文件一致；下载 ZIP SHA256 `31493a7f93906e43cae91cb9f1db8b366675a3c9831d148fc7216dc6c593a122`。
 - 本轮发布不等同于把用户本机测试安装替换为正式版本；本机可按发布说明通过 HACS 升级。
 
 ## 2026-09-30 本机测试版安装
