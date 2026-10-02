@@ -463,6 +463,21 @@ class DeviceCompanionSensor(SensorEntity):
         base_purchase = max(0.0, safe_float(data.get(CONF_TOTAL_PRICE)))
         accumulated_service_cost = max(0.0, safe_float(options.get("accumulated_cost")))
         main_cash_cost = base_purchase + accumulated_service_cost
+        service_adjustments = safe_record_list(options.get("service_adjustments")) if kind == KIND_SERVICE else []
+        bill_adjustments = {}
+        for adjustment in service_adjustments:
+            bill_id = adjustment.get("bill_id")
+            if isinstance(bill_id, str):
+                bill_adjustments[bill_id] = bill_adjustments.get(bill_id, 0.0) + safe_float(adjustment.get("amount"))
+        adjustment_total = sum(bill_adjustments.values())
+        if bill_adjustments:
+            main_cash_cost = max(0.0, round(main_cash_cost + adjustment_total, 2))
+
+        def adjusted_bill_cost(bill, field):
+            original = max(0.0, safe_float(bill.get(field)))
+            bill_id = bill.get("id")
+            delta = bill_adjustments.get(bill_id, 0.0) if isinstance(bill_id, str) else 0.0
+            return max(0.0, round(original + delta, 2)) if delta else original
 
         is_installment = bool(data.get(CONF_IS_INSTALLMENT, False))
         interest = (
@@ -653,7 +668,7 @@ class DeviceCompanionSensor(SensorEntity):
             ]
             if active_periods:
                 active_period = max(active_periods, key=lambda period: safe_date(period.get("period_start")))
-                current_period_cost = max(0.0, safe_float(active_period.get("amount")))
+                current_period_cost = adjusted_bill_cost(active_period, "amount")
                 service_period_months = safe_int(active_period.get("months_covered"), 1)
                 service_period_start = safe_date(active_period.get("period_start"))
                 active_period_end = safe_date(active_period.get("period_end"))
@@ -662,7 +677,7 @@ class DeviceCompanionSensor(SensorEntity):
             for charge in safe_record_list(options.get(CONF_SERVICE_CHARGES)):
                 charge_start = safe_date(charge.get("period_start"))
                 charge_end = safe_date(charge.get("period_end"))
-                charge_cost = max(0.0, safe_float(charge.get("cost")))
+                charge_cost = adjusted_bill_cost(charge, "cost")
                 if charge_start is None or charge_end is None:
                     continue
                 if charge_end < charge_start:
@@ -793,6 +808,8 @@ class DeviceCompanionSensor(SensorEntity):
             "service_monthly_cost": round(service_monthly_cost, 2),
             "service_charges": safe_record_list(options.get(CONF_SERVICE_CHARGES)),
             "service_payments": safe_record_list(options.get(CONF_SERVICE_PAYMENTS)),
+            "service_adjustments": service_adjustments,
+            "service_adjustment_total": round(adjustment_total, 2),
             "consumables_list": processed_consumables,
             "accessories_list": processed_accessories,
             "installment_interest": interest,

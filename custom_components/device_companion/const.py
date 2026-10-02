@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "device_companion"
-INTEGRATION_VERSION = "1.3.0"
+INTEGRATION_VERSION = "1.4.0"
 DATA_LOCKS = "entry_locks"
 
 CONF_DEVICE_NAME = "device_name"

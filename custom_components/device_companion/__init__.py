@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 import logging
 import math
 from pathlib import Path
@@ -71,6 +72,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 SERVICE_RENEW = "renew_service"
 SERVICE_RECORD_CHARGE = "record_service_charge"
+SERVICE_ADJUST_BILL = "adjust_service_bill"
 SERVICE_REPLACE = "replace_consumable"
 SERVICE_SET_LIFECYCLE = "set_lifecycle"
 SERVICE_UPDATE_IMAGE = "update_item_image"
@@ -113,6 +115,14 @@ SERVICE_CHARGE_SCHEMA = TARGET_SCHEMA.extend(
         ),
     }
 )
+ADJUST_BILL_SCHEMA = TARGET_SCHEMA.extend({
+    vol.Required("request_id"): vol.All(cv.string, vol.Length(min=1, max=100)),
+    vol.Required("bill_id"): vol.All(cv.string, vol.Length(min=1, max=100)),
+    vol.Required("operation"): vol.In(("refund", "correction")),
+    vol.Required("cost"): _finite_amount,
+    vol.Optional("paid_at"): cv.date,
+    vol.Required("description"): vol.All(cv.string, vol.Length(min=1, max=200)),
+})
 REPLACE_SCHEMA = TARGET_SCHEMA.extend(
     {
         vol.Required("cons_id"): cv.string,
@@ -297,6 +307,9 @@ def _register_services(hass: HomeAssistant) -> None:
     async def handle_charge(call: ServiceCall) -> None:
         await _handle_service_charge(hass, call)
 
+    async def handle_adjust(call: ServiceCall) -> None:
+        await _handle_adjust_bill(hass, call)
+
     async def handle_replace(call: ServiceCall) -> None:
         await _handle_replace_consumable(hass, call)
 
@@ -313,6 +326,7 @@ def _register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, SERVICE_RECORD_CHARGE, handle_charge, schema=SERVICE_CHARGE_SCHEMA
     )
+    hass.services.async_register(DOMAIN, SERVICE_ADJUST_BILL, handle_adjust, schema=ADJUST_BILL_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_REPLACE, handle_replace, schema=REPLACE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_SET_LIFECYCLE, handle_lifecycle, schema=LIFECYCLE_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_UPDATE_IMAGE, handle_image, schema=IMAGE_SCHEMA)
@@ -553,6 +567,83 @@ async def _handle_service_charge(hass: HomeAssistant, call: ServiceCall) -> None
             charges[-1]["new_monthly_price"] = options[CONF_PLAN_MONTHLY_PRICE]
         options[CONF_SERVICE_CHARGES] = charges
         options["accumulated_cost"] = safe_float(options.get("accumulated_cost")) + cost
+
+    await _update_options(hass, entry, mutate)
+
+
+def _bill_money(value) -> Decimal:
+    """Reject corrupt and sub-cent amounts instead of silently rounding bills."""
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        amount = Decimal(str(value))
+        if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal("0.01")):
+            raise ValueError
+        return amount
+    except (InvalidOperation, ValueError, TypeError) as err:
+        raise ServiceValidationError("账单金额必须是非负数，最多两位小数") from err
+
+
+async def _handle_adjust_bill(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Append an immutable linked adjustment, without altering paid coverage."""
+    entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
+    if infer_kind(dict(entry.data)) != KIND_SERVICE:
+        raise ServiceValidationError("只有虚拟服务账单可以退款或更正")
+
+    def mutate(options):
+        if not _payment_request(options, call, SERVICE_ADJUST_BILL):
+            return False
+        bill_id = call.data["bill_id"]
+        matches = [(bill, key) for field, key in ((CONF_SERVICE_PAYMENTS, "amount"), (CONF_SERVICE_CHARGES, "cost"))
+                   for bill in safe_record_list(options.get(field)) if bill.get("id") == bill_id]
+        if len(matches) != 1:
+            raise ServiceValidationError("找不到唯一原账单；旧未追踪费用不能直接调整")
+        bill, amount_key = matches[0]
+        original = _bill_money(bill.get(amount_key))
+        paid_at = _paid_date(call, today_local())
+        original_date = safe_date(bill.get("paid_at"))
+        if original_date is None or paid_at < original_date:
+            raise ServiceValidationError("调整日期不能早于原付款日期；缺失付款日期需先核对")
+        description = str(call.data.get("description", "")).strip()
+        if not description:
+            raise ServiceValidationError("请填写退款或更正原因")
+        adjustments = safe_record_list(options.get("service_adjustments"))
+        related = [item for item in adjustments if item.get("bill_id") == bill_id]
+        def signed_amount(item):
+            try:
+                amount = Decimal(str(item.get("amount")))
+                _bill_money(abs(amount))
+                return amount
+            except InvalidOperation as err:
+                raise ServiceValidationError("调整流水金额损坏，请先核对") from err
+
+        corrections = sum((signed_amount(item)
+                           for item in related if item.get("operation") == "correction"), Decimal(0))
+        refunds = sum((-signed_amount(item) for item in related if item.get("operation") == "refund"), Decimal(0))
+        if any((day := safe_date(item.get("paid_at"))) is None or paid_at < day for item in related):
+            raise ServiceValidationError("调整日期不能早于该账单已有调整日期")
+        requested = _bill_money(call.data["cost"])
+        operation = call.data["operation"]
+        if operation == "refund":
+            if requested <= 0 or requested > original + corrections - refunds:
+                raise ServiceValidationError("退款金额必须大于零，且不能超过原账单剩余净额")
+            delta = -requested
+        elif operation == "correction":
+            if refunds:
+                raise ServiceValidationError("该账单已有退款，不能再更正原付款金额")
+            delta = requested - original - corrections
+            if delta == 0:
+                raise ServiceValidationError("更正后金额未发生变化")
+        else:
+            raise ServiceValidationError("不支持的账单调整类型")
+        total_delta = sum((signed_amount(item) for item in adjustments), Decimal(0)) + delta
+        gross = Decimal(str(safe_float(entry.data.get(CONF_TOTAL_PRICE)))) + Decimal(str(safe_float(options.get("accumulated_cost"))))
+        if gross + total_delta < 0:
+            raise ServiceValidationError("调整将使累计净投入为负，请先核对原始账单")
+        adjustments.append({"id": f"adjust_{uuid.uuid4().hex[:12]}", "bill_id": bill_id,
+                            "operation": operation, "amount": float(delta), "paid_at": str(paid_at),
+                            "description": description})
+        options["service_adjustments"] = adjustments
 
     await _update_options(hass, entry, mutate)
 

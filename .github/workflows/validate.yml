@@ -39,6 +39,8 @@ jobs:
         run: |
           node --check custom_components/device_companion/frontend/device-companion-card.js
           node --check custom_components/device_companion/frontend/device-companion-summary.js
+      - name: Frontend billing tests
+        run: node --test tests/frontend.test.cjs
 
   pytest:
     runs-on: ubuntu-latest

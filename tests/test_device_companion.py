@@ -845,6 +845,33 @@ def _real_service_entry(*, device_name: str = "真实订阅") -> MockConfigEntry
 
 
 @pytest.mark.asyncio
+async def test_real_refund_service_reload_preserves_entity_and_receipt(hass, enable_custom_integrations):
+    entry = _real_service_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"companion_{entry.entry_id}")
+    await hass.services.async_call(DOMAIN, "renew_service", {ATTR_ENTITY_ID: entity_id, "months": 1, "cost": 25}, blocking=True)
+    await hass.async_block_till_done()
+    bill = dict(entry.options["service_payments"][-1])
+    expiration = entry.options[CONF_EXPIRATION_DATE]
+    payload = {ATTR_ENTITY_ID: entity_id, "bill_id": bill["id"], "operation": "refund", "cost": 5,
+               "request_id": "real-refund", "description": "实测冲销"}
+    await hass.services.async_call(DOMAIN, "adjust_service_bill", payload, blocking=True)
+    await hass.async_block_till_done()
+    assert entry.options["service_payments"][-1] == bill
+    assert entry.options[CONF_EXPIRATION_DATE] == expiration
+    assert hass.states.get(entity_id).attributes["service_adjustment_total"] == -5
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await hass.services.async_call(DOMAIN, "adjust_service_bill", payload, blocking=True)
+    await hass.async_block_till_done()
+    assert len(entry.options["service_adjustments"]) == 1
+    assert registry.async_get_entity_id("sensor", DOMAIN, f"companion_{entry.entry_id}") == entity_id
+
+
+@pytest.mark.asyncio
 async def test_real_entry_setup_service_and_unload(hass, enable_custom_integrations):
     entry = _real_service_entry()
     entry.add_to_hass(hass)

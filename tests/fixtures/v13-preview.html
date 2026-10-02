@@ -3,25 +3,44 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HomeAsset v1.3 本地验证</title>
-<style>body{margin:20px;background:#eee;color:#333;font:16px system-ui}main{max-width:420px;margin:auto}#calls{overflow-wrap:anywhere}button{padding:10px}device-companion-card{display:block;margin:16px 0}</style>
-<main><p>本地模拟验证，不连接实际 Home Assistant。</p><button id="fail">模拟保存后连接中断一次</button><p id="calls">已记账 0 笔</p><device-companion-card></device-companion-card></main>
+<style>body{margin:20px;background:#eee;color:#333;font:16px system-ui}body.dark{background:#141516;color:#e8e8e8;--card-background-color:#202124;--primary-text-color:#e8e8e8;--secondary-text-color:#b0b0b0;--secondary-background-color:#303134}main{max-width:420px;margin:auto}#calls{overflow-wrap:anywhere}button{padding:10px}device-companion-card{display:block;margin:16px 0}</style>
+<main><p>本地模拟验证，不连接实际 Home Assistant。</p><button id="fail">模拟保存后连接中断一次</button><button id="no-expiry">切换无到期日</button><button id="theme">切换明暗主题</button><p id="calls">已记账 0 笔</p><device-companion-card></device-companion-card></main>
 <script type="module">
 import '/custom_components/device_companion/frontend/device-companion-card.js';
 const card=document.querySelector('device-companion-card');
 const attrs={integration_domain:'device_companion',friendly_name:'ChatGPT Plus',kind:'service',category:'虚拟服务',today:'2026-09-30',purchase_date:'2026-09-12',expiration_date:'2026-11-12',status:'active',stored_status:'active',current_period_cost:280,service_period_months:2,plan_monthly_price:140,renewal_price:140,renewal_months:1,current_period_total_cost:280,current_period_base_monthly_cost:140,current_monthly_cost:140,service_percent:70,service_remain_days:43,payment_coverage_status:'ok',expiry_reminders:true,service_payments:[{id:'first',payment_type:'initial',amount:280,paid_at:'2026-09-12',period_start:'2026-09-12',period_end:'2026-11-12',months_covered:2,description:'首次预付'}],service_charges:[],consumables_list:[],accessories_list:[],badges:[]};
 let fail=false;
+attrs.service_adjustments=[];
+attrs.main_net_investment=280;
 const receipts=new Map();
 document.querySelector('#fail').onclick=()=>{fail=true;};
 const hass={states:{'sensor.preview':{state:'18',attributes:attrs}},callService:async (_domain,service,payload)=>{
   if(!receipts.has(payload.request_id)){
-    receipts.set(payload.request_id,{service,payload});
     if(service==='record_service_charge')attrs.service_charges.push({id:payload.request_id,charge_type:payload.charge_type,cost:payload.cost,paid_at:payload.paid_at,description:payload.description});
+    else if(service==='adjust_service_bill'){
+      // UI simulation only. Production validation is covered by HA service tests.
+      const original=attrs.service_payments.find(bill=>bill.id===payload.bill_id);
+      if(!original)throw new Error('模拟账单不存在');
+      const related=attrs.service_adjustments.filter(bill=>bill.bill_id===original.id);
+      const balance=original.amount+related.reduce((sum,bill)=>sum+bill.amount,0);
+      if(payload.operation==='refund'&&(payload.cost<=0||payload.cost>balance))throw new Error('退款不能超过剩余净额');
+      if(payload.operation==='correction'&&related.some(bill=>bill.operation==='refund'))throw new Error('该账单已有退款，不能更正');
+      const amount=payload.operation==='refund'?-payload.cost:payload.cost-balance;
+      attrs.service_adjustments.push({id:payload.request_id,bill_id:original.id,operation:payload.operation,amount,paid_at:payload.paid_at,description:payload.description});
+      attrs.main_net_investment=280+attrs.service_adjustments.reduce((sum,bill)=>sum+bill.amount,0);
+      attrs.current_period_cost=attrs.main_net_investment;
+      attrs.current_period_total_cost=attrs.main_net_investment;
+      attrs.current_monthly_cost=attrs.main_net_investment/2;
+    }
     else attrs.service_payments.push({id:payload.request_id,payment_type:'renewal',amount:payload.cost,paid_at:payload.paid_at,period_start:'2026-11-12',period_end:'2026-12-12',months_covered:payload.months});
+    receipts.set(payload.request_id,{service,payload});
   }
   document.querySelector('#calls').textContent=`已记账 ${receipts.size} 笔`;
   card.hass=hass;
   if(fail){fail=false;throw new Error('模拟保存后连接中断');}
 }};
 card.setConfig({entity:'sensor.preview'});card.hass=hass;
+document.querySelector('#no-expiry').onclick=()=>{attrs.expiration_date='';card.hass=hass;};
+document.querySelector('#theme').onclick=()=>document.body.classList.toggle('dark');
 </script>
 </html>
