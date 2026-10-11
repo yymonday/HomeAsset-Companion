@@ -29,6 +29,7 @@ from .const import (
     CONF_EARLY_PAYOFF,
     CONF_EARLY_PAYOFF_FEE,
     CONF_EXPIRATION_DATE,
+    CONF_FOLLOW_MAIN_RENEWAL,
     CONF_INSTALLMENT_INTEREST,
     CONF_INSTALLMENT_MONTHS,
     CONF_IS_INSTALLMENT,
@@ -61,9 +62,11 @@ from .const import (
     TRACKING_MODE_SMART,
 )
 from .helpers import (
+    effective_service_records,
     infer_kind,
     is_terminal_status,
     legacy_status,
+    perk_period,
     safe_date,
     safe_float,
     safe_int,
@@ -526,6 +529,9 @@ class DeviceCompanionSensor(SensorEntity):
             item = deepcopy(source)
             purchase = safe_date(item.get("purchase_date"), today)
             item_expiration = safe_date(item.get(CONF_EXPIRATION_DATE))
+            period_start = purchase
+            if kind == KIND_SERVICE:
+                period_start, item_expiration = perk_period(item, options)
             stored_item_status = legacy_status(item)
             item_status = (
                 STATUS_EXPIRED
@@ -598,6 +604,8 @@ class DeviceCompanionSensor(SensorEntity):
                     "is_wearing": item.get("is_wearing", False),
                     "purchase_date": str(purchase),
                     "expiration_date": str(item_expiration) if item_expiration else "",
+                    "service_period_start": str(period_start) if period_start else "",
+                    "follow_main_renewal": bool(item.get(CONF_FOLLOW_MAIN_RENEWAL, True)) if kind == KIND_SERVICE else False,
                     "is_installment": item_is_installment,
                     "installment_months": item_installment_months,
                     "months_paid": installment["months_paid"],
@@ -658,7 +666,21 @@ class DeviceCompanionSensor(SensorEntity):
                 options.get("service_period_start"), purchase_date
             )
             active_period_end = expiration_date
-            periods = safe_record_list(options.get(CONF_SERVICE_PAYMENTS)) + safe_record_list(options.get("service_period_snapshots"))
+            payments = effective_service_records(options, CONF_SERVICE_PAYMENTS)
+            # Snapshots duplicate recorded periods only for legacy cost fallback.
+            # Never let an old snapshot resurrect a superseded bill's dates.
+            recorded_periods = {(safe_date(item.get("period_start")), safe_date(item.get("period_end")))
+                                for item in safe_record_list(options.get(CONF_SERVICE_PAYMENTS)) + payments}
+            recorded_ids = {item["id"] for item in payments if isinstance(item.get("id"), str)}
+            for revision in service_adjustments:
+                dates = revision.get("date_correction")
+                if not isinstance(revision.get("bill_id"), str) or revision["bill_id"] not in recorded_ids or not isinstance(dates, dict):
+                    continue
+                for version in (dates.get("before"), dates.get("after")):
+                    if isinstance(version, dict):
+                        recorded_periods.add((safe_date(version.get("period_start")), safe_date(version.get("period_end"))))
+            periods = payments + [item for item in safe_record_list(options.get("service_period_snapshots"))
+                                  if (safe_date(item.get("period_start")), safe_date(item.get("period_end"))) not in recorded_periods]
             active_periods = [
                 period for period in periods
                 if (start := safe_date(period.get("period_start"))) is not None
@@ -674,7 +696,7 @@ class DeviceCompanionSensor(SensorEntity):
                 active_period_end = safe_date(active_period.get("period_end"))
             elif periods and service_period_start > today:
                 current_period_cost = 0.0
-            for charge in safe_record_list(options.get(CONF_SERVICE_CHARGES)):
+            for charge in effective_service_records(options, CONF_SERVICE_CHARGES):
                 charge_start = safe_date(charge.get("period_start"))
                 charge_end = safe_date(charge.get("period_end"))
                 charge_cost = adjusted_bill_cost(charge, "cost")
@@ -694,7 +716,7 @@ class DeviceCompanionSensor(SensorEntity):
                     current_period_extra_cost += charge_cost
             payment_ends = [
                 payment_end
-                for payment in safe_record_list(options.get(CONF_SERVICE_PAYMENTS))
+                for payment in payments
                 if (payment_end := safe_date(payment.get("period_end"))) is not None
             ]
             if payment_ends:
@@ -783,6 +805,7 @@ class DeviceCompanionSensor(SensorEntity):
             "plan_monthly_price": round(plan_monthly_price, 2),
             "service_period_months": service_period_months,
             "current_period_start": str(service_period_start) if kind == KIND_SERVICE else "",
+            "renewal_period_start": str(options.get("service_period_start", purchase_date)) if kind == KIND_SERVICE else "",
             "current_period_end": str(active_period_end) if kind == KIND_SERVICE and active_period_end else "",
             "expiry_reminders": bool(options.get("expiry_reminders", False)),
             "renewal_months": SUB_PERIOD_MONTHS.get(options.get(CONF_SUB_PERIOD), 1),
@@ -806,8 +829,8 @@ class DeviceCompanionSensor(SensorEntity):
             "service_percent": service_percent,
             "service_remain_days": service_remain_days,
             "service_monthly_cost": round(service_monthly_cost, 2),
-            "service_charges": safe_record_list(options.get(CONF_SERVICE_CHARGES)),
-            "service_payments": safe_record_list(options.get(CONF_SERVICE_PAYMENTS)),
+            "service_charges": effective_service_records(options, CONF_SERVICE_CHARGES),
+            "service_payments": effective_service_records(options, CONF_SERVICE_PAYMENTS),
             "service_adjustments": service_adjustments,
             "service_adjustment_total": round(adjustment_total, 2),
             "consumables_list": processed_consumables,
@@ -993,6 +1016,8 @@ class AccessorySensor(SensorEntity):
         purchase = safe_date(self._item.get("purchase_date"), today)
         status = legacy_status(self._item)
         expiration = safe_date(self._item.get(CONF_EXPIRATION_DATE))
+        if infer_kind(dict(self._entry.data)) == KIND_SERVICE:
+            _, expiration = perk_period(self._item, dict(self._entry.options))
         if (
             infer_kind(dict(self._entry.data)) == KIND_SERVICE
             and status == STATUS_ACTIVE
@@ -1010,6 +1035,9 @@ class AccessorySensor(SensorEntity):
         today = today_local()
         stored_status = legacy_status(self._item)
         expiration = safe_date(self._item.get(CONF_EXPIRATION_DATE))
+        period_start = safe_date(self._item.get("purchase_date"))
+        if infer_kind(dict(self._entry.data)) == KIND_SERVICE:
+            period_start, expiration = perk_period(self._item, dict(self._entry.options))
         status = _effective_status(
             stored_status, infer_kind(dict(self._entry.data)), expiration, today
         )
@@ -1017,6 +1045,8 @@ class AccessorySensor(SensorEntity):
             "status": status,
             "stored_status": stored_status,
             "status_label": status_label(status),
+            "service_period_start": str(period_start) if period_start else "",
+            "expiration_date": str(expiration) if expiration else "",
             "net_investment": round(
                 safe_float(self._item.get("price"))
                 + safe_float(self._item.get(CONF_INSTALLMENT_INTEREST))

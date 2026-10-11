@@ -7,7 +7,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../custom_components/device_companion/frontend/device-companion-card.js'), 'utf8');
 function runtime(extra = {}) {
   const context = vm.createContext({ HTMLElement: class {}, customElements: { get: () => true }, window: {}, ...extra });
-  vm.runInContext(source + '\nthis.api = { dcBills, dcCsvCell, dcBillCsv, DeviceCompanionCard };', context);
+  vm.runInContext(source + '\nthis.api = { dcBills, dcCsvCell, dcBillCsv, dcPaymentDate, dcBillNote, dcPerkCanRenew, dcPerkPayload, DeviceCompanionCard };', context);
   return context.api;
 }
 const api = runtime();
@@ -123,7 +123,7 @@ test('CSV includes linked signed adjustments as numbers, not formula text', () =
 });
 test('refund/correction form requires bill and reason with distinct amount semantics', () => {
   const nodes = new Map();
-  const fields = Object.fromEntries(['charge_type', 'bill_id', 'description', 'cost', 'months', 'new_monthly_price'].map(name => [name, {}]));
+  const fields = Object.fromEntries(['charge_type', 'bill_id', 'description', 'cost', 'months', 'new_monthly_price', 'paid_at'].map(name => [name, {}]));
   const card = new api.DeviceCompanionCard();
   card.content = {getElementById: id => {
     if (id === 'payment-form') return {elements: fields};
@@ -139,9 +139,123 @@ test('refund/correction form requires bill and reason with distinct amount seman
   fields.charge_type.value = 'correction';
   card._paymentTypeChanged();
   assert.ok(nodes.get('payment-amount-label').textContent.includes('原付款总金额'));
+  assert.equal(nodes.get('payment-date-label').textContent, '更正后的实际付款日期');
+  assert.ok(nodes.get('payment-help').textContent.includes('原错误账期将被替换'));
   fields.charge_type.value = 'extra_quota';
   card._paymentTypeChanged();
   assert.equal(fields.bill_id.required, false);
   assert.equal(fields.bill_id.disabled, true);
   assert.equal(fields.description.required, false);
+});
+test('date correction uses actual-payment revision, never adjustment timestamp', () => {
+  assert.deepEqual({...api.dcPaymentDate('correction', '2026-10-09')}, {corrected_paid_at: '2026-10-09'});
+  for (const type of ['refund', 'renewal', 'extra_quota']) {
+    assert.deepEqual({...api.dcPaymentDate(type, '2026-10-09')}, {paid_at: '2026-10-09'});
+  }
+});
+test('correction prefills effective date and corrected total, not original wrong fields', () => {
+  const fields = {charge_type: {value:'correction'}, bill_id: {value:'current'}, cost: {}, paid_at: {}};
+  const card = new api.DeviceCompanionCard();
+  card.content = {getElementById: () => ({elements:fields})};
+  card._lastAttrs = {
+    service_payments:[{id:'current', amount:280, paid_at:'2026-10-09'}],
+    service_adjustments:[{bill_id:'current', amount:-30}, {bill_id:'other', amount:100}]
+  };
+  card._prefillBillCorrection();
+  assert.equal(fields.cost.value, '250.00');
+  assert.equal(fields.paid_at.value, '2026-10-09');
+  fields.charge_type.value = 'refund';
+  fields.cost.value = '10';
+  card._prefillBillCorrection();
+  assert.equal(fields.cost.value, '10');
+});
+test('CSV keeps date revision audit while exporting only effective paid coverage', () => {
+  const revision = {id:'fix', bill_id:'current', operation:'correction', amount:0, paid_at:'2026-10-11', description:'纠正付款日期', date_correction:{before:{paid_at:'2026-09-30', period_start:'2026-09-30', period_end:'2026-10-30'}, after:{paid_at:'2026-10-09', period_start:'2026-10-09', period_end:'2026-11-09'}}};
+  const csv = api.dcBillCsv({service_payments:[{id:'current', payment_type:'renewal', amount:670, paid_at:'2026-10-09', period_start:'2026-10-09', period_end:'2026-11-09', months_covered:1}], service_adjustments:[revision]}, 'sensor.test');
+  assert.ok(csv.includes('"670.00","2026-10-09","2026-11-09","1"'));
+  assert.ok(csv.includes('原错误账期已替换'));
+  assert.ok(csv.includes('2026-09-30 更正为 2026-10-09'));
+  assert.ok(!csv.includes('"670.00","2026-09-30","2026-10-30"'));
+});
+
+test('expired gifts retain a renewal entry, canceled gifts and parents do not', () => {
+  for (const status of ['active', 'expired']) {
+    assert.equal(api.dcPerkCanRenew({id:'music', status, is_retired:status === 'expired'}, {stored_status:'active'}), true);
+  }
+  for (const status of ['canceled', 'archived', 'lost', 'gifted', 'sold', 'scrapped']) {
+    assert.equal(api.dcPerkCanRenew({id:'music', status}, {stored_status:'active'}), false);
+    assert.equal(api.dcPerkCanRenew({id:'music', status:'expired'}, {stored_status:status}), false);
+  }
+  assert.equal(api.dcPerkCanRenew({id:'music', is_retired:true}, {stored_status:'active'}), false);
+  assert.equal(api.dcPerkCanRenew({status:'active'}, {stored_status:'active'}), false);
+});
+
+test('gift synchronization excludes independent dates and cash amounts', () => {
+  const sync = {...api.dcPerkPayload('music', true, 'old', 'old')};
+  assert.deepEqual(sync, {perk_id:'music', follow_main_renewal:true});
+  const manual = {...api.dcPerkPayload('music', false, '2026-10-10', '2027-10-10')};
+  assert.deepEqual(manual, {perk_id:'music', follow_main_renewal:false, start_date:'2026-10-10', expiration_date:'2027-10-10'});
+  assert.ok(!('cost' in sync) && !('cost' in manual));
+});
+
+function perkFormCard() {
+  const nodes = new Map();
+  const fields = {follow_main:{value:'true', focus() {}}, start_date:{value:'2026-10-10'}, expiration_date:{value:'2027-10-10'}};
+  const form = {elements:fields, hidden:false, reset() {}, reportValidity:() => true};
+  const card = new api.DeviceCompanionCard();
+  card.content = {getElementById: id => {
+    if (id === 'perk-form') return form;
+    if (!nodes.has(id)) nodes.set(id, {});
+    return nodes.get(id);
+  }};
+  card._lastAttrs = {stored_status:'active', purchase_date:'2025-10-08', today:'2026-10-11', renewal_period_start:'2026-10-10', current_period_start:'2025-10-08', expiration_date:'2027-10-10', accessories_list:[{id:'music', name:'音乐VIP', status:'expired', is_retired:true, purchase_date:'2025-10-08'}]};
+  card._perkId = 'music';
+  return {card, fields, form, nodes};
+}
+
+test('gift form opens without writes and uses the registered renewal rather than old active period', () => {
+  const {card, fields, form, nodes} = perkFormCard();
+  card._callAction = () => assert.fail('opening must not save');
+  card._openPerk('music');
+  assert.equal(form.hidden, false);
+  assert.equal(nodes.get('payment-form').hidden, true);
+  assert.equal(nodes.get('perk-title').textContent, '续订权益 · 音乐VIP');
+  assert.equal(nodes.get('perk-period').textContent, '同步为 2026-10-10 至 2027-10-10');
+  assert.equal(fields.start_date.disabled, true);
+  assert.equal(fields.expiration_date.required, false);
+  fields.follow_main.value = 'false';
+  card._perkModeChanged();
+  assert.equal(fields.start_date.disabled, false);
+  assert.equal(fields.expiration_date.required, true);
+  assert.equal(nodes.get('perk-dates').hidden, false);
+  assert.equal(nodes.get('perk-submit').textContent, '确认登记');
+});
+
+test('gift retry preserves inputs and request ID, success closes form, busy blocks submit', async () => {
+  const {card, fields, form} = perkFormCard();
+  const calls = [];
+  card._callAction = async (action, payload) => {calls.push({action, payload}); return calls.length > 1;};
+  await card._submitPerk({preventDefault() {}});
+  assert.equal(form.hidden, false);
+  await card._submitPerk({preventDefault() {}});
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].action, 'renew_service_perk');
+  assert.equal(calls[0].payload.request_id, calls[1].payload.request_id);
+  assert.ok(!('start_date' in calls[0].payload));
+  assert.ok(!('cost' in calls[0].payload));
+  assert.equal(form.hidden, true);
+  fields.follow_main.value = 'false';
+  await card._submitPerk({preventDefault() {}});
+  assert.ok(calls[2].payload.request_id !== calls[1].payload.request_id);
+  assert.equal(calls[2].payload.expiration_date, '2027-10-10');
+  card._busy = true;
+  await card._submitPerk({preventDefault() {}});
+  assert.equal(calls.length, 3);
+});
+
+test('gift entry preserves incumbent neutral buttons, responsive height and focus', () => {
+  assert.match(source, /\.perk-actions \.action-btn-outline \{[^}]*background:rgba\(128,128,128,\.05\)[^}]*min-height:32px/);
+  assert.match(source, /@media \(pointer:coarse\)[^\n]*\.perk-actions[^\n]*min-height:44px/);
+  assert.ok(source.includes('#accessories-container button:focus-visible'));
+  assert.ok(source.includes('isService && dcPerkCanRenew(acc, attrs)'));
 });

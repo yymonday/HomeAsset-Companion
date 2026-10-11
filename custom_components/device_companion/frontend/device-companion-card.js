@@ -1,5 +1,5 @@
 /**
- * HomeAsset Companion Detail Card v1.4.0
+ * HomeAsset Companion Detail Card v1.4.1b2
  * Compatible with legacy V153 entities and the V2 lifecycle schema.
  */
 
@@ -7,7 +7,23 @@ const dcEscape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
 const dcNumber = (value, fallback = 0) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
 const dcSafeIcon = (value) => /^mdi:[a-z0-9-]+$/i.test(String(value || "")) ? String(value) : "mdi:information-outline";
 const dcSafeImageUrl = (value) => { const raw = String(value || "").trim(); return raw.startsWith("/local/") || raw.startsWith("http://") || raw.startsWith("https://") ? encodeURI(raw) : ""; };
-const dcBillLabels = { initial: "首次付款", renewal: "续订付款", upgrade: "升级差价", extra_quota: "额外额度", other: "其他支出", refund: "退款", correction: "金额更正" };
+const dcBillLabels = { initial: "首次付款", renewal: "续订付款", upgrade: "升级差价", extra_quota: "额外额度", other: "其他支出", refund: "退款", correction: "账单更正" };
+const dcPaymentDate = (type, value) => type === "correction" ? { corrected_paid_at: value } : { paid_at: value };
+const dcPerkCanRenew = (perk, attrs) => {
+  const stopped = new Set(["archived", "sold", "scrapped", "lost", "gifted", "canceled"]);
+  return typeof perk.id === "string" && !!perk.id && !stopped.has(perk.status)
+    && !(perk.is_retired && perk.status !== "expired")
+    && !stopped.has(attrs.stored_status || attrs.status);
+};
+const dcPerkPayload = (perkId, follow, start, end) => ({
+  perk_id: perkId, follow_main_renewal: follow,
+  ...(follow ? {} : { start_date: start, expiration_date: end }),
+});
+const dcBillNote = (bill) => {
+  const correction = bill.date_correction;
+  if (!correction?.before || !correction?.after) return bill.description || "";
+  return `${bill.description || "账单更正"}；实际付款日期 ${correction.before.paid_at} 更正为 ${correction.after.paid_at}；更正后账期 ${correction.after.period_start} 至 ${correction.after.period_end}（原错误账期已替换）`;
+};
 const dcBills = (attrs) => [
   ...(Array.isArray(attrs.service_payments) ? attrs.service_payments : []).filter((bill) => bill && typeof bill === "object" && !Array.isArray(bill)).map((bill) => ({ ...bill, type: bill.payment_type, amount: bill.amount, coverage: true })),
   ...(Array.isArray(attrs.service_charges) ? attrs.service_charges : []).filter((bill) => bill && typeof bill === "object" && !Array.isArray(bill)).map((bill) => ({ ...bill, type: bill.charge_type, amount: bill.cost, coverage: false })),
@@ -26,7 +42,7 @@ const dcBillCsv = (attrs, entityId) => {
     entityId, attrs.friendly_name || "", bill.id, bill.paid_at,
     dcBillLabels[bill.type] || bill.type || "付款", money(bill.amount),
     bill.coverage ? bill.period_start : "", bill.coverage ? bill.period_end : "",
-    bill.coverage ? bill.months_covered : "", bill.description, bill.bill_id,
+    bill.coverage ? bill.months_covered : "", dcBillNote(bill), bill.bill_id,
   ]);
   // Amounts have already been validated/formatted above. Keep signed numeric
   // cells numeric for spreadsheet sums; only text needs formula protection.
@@ -129,6 +145,13 @@ class DeviceCompanionCard extends HTMLElement {
         
         .acc-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 0.75rem; color: var(--dc-text-sub); margin-top: 4px; }
         .acc-meta span { background: rgba(128,128,128,0.06); padding: 4px 8px; border-radius: 6px; font-weight: 600; border: 1px solid rgba(128,128,128,0.05); }
+        .perk-actions { display:flex; justify-content:flex-end; margin-top:auto; position:relative; z-index:5; }
+        .perk-actions .action-btn-outline { background:rgba(128,128,128,.05); color:var(--dc-text-main); border:1px solid rgba(128,128,128,.08); border-radius:8px; box-sizing:border-box; min-height:32px; padding:6px 10px; display:inline-flex; align-items:center; justify-content:center; gap:4px; line-height:1.2; }
+        .perk-actions .action-btn-outline:hover { background:rgba(var(--dc-theme-rgb),.06); border-color:rgba(var(--dc-theme-rgb),.2); }
+        @media (pointer:coarse) { .perk-actions .action-btn-outline { min-height:44px; } #perk-form input,#perk-form select { font-size:16px; } }
+        #accessories-container button:focus-visible { outline:2px solid var(--dc-theme); outline-offset:3px; }
+        #perk-form h3 { font-size:.95rem; margin:0 0 16px; color:var(--dc-text-main); overflow-wrap:anywhere; }
+        #perk-status { font-size:.75rem; line-height:1.65; color:var(--dc-text-sub); overflow-wrap:anywhere; }
         
         .acc-inst-bar { height: 6px; background-color: var(--dc-progress-bg); border-radius: 3px; overflow: hidden; margin-top: 4px; box-shadow: inset 1px 1px 2px rgba(0,0,0,0.05); }
         .acc-inst-fill { height: 100%; border-radius: 3px; transition: width 1s ease; }
@@ -226,7 +249,7 @@ class DeviceCompanionCard extends HTMLElement {
           </div>
 
           <form id="payment-form" class="payment-panel" hidden>
-            <label>付款类型<select name="charge_type"><option value="renewal">续订付款</option><option value="extra_quota">额外额度</option><option value="upgrade">升级差价</option><option value="other">其他附加支出</option><option value="refund">退款</option><option value="correction">金额更正</option></select></label>
+            <label>付款类型<select name="charge_type"><option value="renewal">续订付款</option><option value="extra_quota">额外额度</option><option value="upgrade">升级差价</option><option value="other">其他附加支出</option><option value="refund">退款</option><option value="correction">更正金额 / 付款日期</option></select></label>
             <label id="payment-bill" hidden>关联原账单<select name="bill_id"></select></label>
             <label><span id="payment-amount-label">实际已支付金额（元）</span><input name="cost" type="number" min="0" step="0.01" required inputmode="decimal"></label>
             <label><span id="payment-date-label">实际付款日期</span><input name="paid_at" type="date" required></label>
@@ -241,6 +264,18 @@ class DeviceCompanionCard extends HTMLElement {
 
           <div id="consumables-container"></div>
           <div id="accessories-container" class="accessories-grid"></div>
+          <form id="perk-form" class="payment-panel" hidden>
+            <h3 id="perk-title">续订赠送权益</h3>
+            <label>续订方式<select name="follow_main"><option value="true">跟随主服务续订</option><option value="false">独立期限，手动登记</option></select></label>
+            <p id="perk-period"></p>
+            <div id="perk-dates" hidden>
+              <label>本次权益生效日期<input name="start_date" type="date" required></label>
+              <label>新的到期日<input name="expiration_date" type="date" required></label>
+            </div>
+            <p id="perk-help">同步主服务当前登记的账期，以后主服务续订会自动更新此权益。仅记录赠送权益，不新增付款，也不会向平台续费。</p>
+            <div class="payment-actions"><button type="submit" class="action-btn-outline" id="perk-submit">确认同步</button><button type="button" id="perk-cancel" class="action-btn-outline">取消</button></div>
+          </form>
+          <div id="perk-status" role="status" aria-live="polite"></div>
           <div class="badges-container" id="badges-container" style="display:none;"></div>
         </div>
         <div id="empty-area" class="empty-state" style="display:none;">配置加载中或未选择设备 ⚙️</div>
@@ -268,6 +303,7 @@ class DeviceCompanionCard extends HTMLElement {
       form.elements.cost.value = "";
       this._paymentTypeChanged();
     });
+    form.elements.bill_id.addEventListener("change", () => this._prefillBillCorrection());
     form.elements.months.addEventListener("change", () => {
       if (form.elements.charge_type.value === "renewal") form.elements.cost.value = (dcNumber(this._lastAttrs?.plan_monthly_price) * Number(form.elements.months.value)).toFixed(2);
     });
@@ -276,7 +312,7 @@ class DeviceCompanionCard extends HTMLElement {
       event.preventDefault();
       if (this._busy || !form.reportValidity()) return;
       const type = form.elements.charge_type.value;
-      const payload = { cost: Number(form.elements.cost.value), paid_at: form.elements.paid_at.value };
+      const payload = { cost: Number(form.elements.cost.value), ...dcPaymentDate(type, form.elements.paid_at.value) };
       const adjustment = ["refund", "correction"].includes(type);
       const action = adjustment ? "adjust_service_bill" : type === "renewal" ? "renew_service" : "record_service_charge";
       if (type === "renewal") payload.months = Number(form.elements.months.value);
@@ -298,12 +334,70 @@ class DeviceCompanionCard extends HTMLElement {
       payload.request_id = this._paymentRequest;
       if (await this._callAction(action, payload)) { form.hidden = true; this._paymentSignature = null; }
     });
+    const perkForm = shadowRoot.getElementById("perk-form");
+    perkForm.elements.follow_main.addEventListener("change", () => this._perkModeChanged());
+    shadowRoot.getElementById("perk-cancel").addEventListener("click", () => { if (!this._busy) perkForm.hidden = true; });
+    perkForm.addEventListener("submit", (event) => this._submitPerk(event));
+  }
+
+  _openPerk(perkId) {
+    if (this._busy) return;
+    const perk = (this._lastAttrs?.accessories_list || []).find((item) => item.id === perkId);
+    if (!perk || !dcPerkCanRenew(perk, this._lastAttrs || {})) return;
+    this._perkId = perkId;
+    const form = this.content.getElementById("perk-form");
+    form.reset();
+    this.content.getElementById("payment-form").hidden = true;
+    this.content.getElementById("perk-title").textContent = `续订权益 · ${perk.name || "赠送权益"}`;
+    form.elements.follow_main.value = perk.follow_main_renewal === false ? "false" : "true";
+    form.elements.start_date.value = this._lastAttrs.today || new Date().toLocaleDateString("en-CA");
+    form.elements.start_date.min = perk.purchase_date || "";
+    form.elements.expiration_date.value = this._lastAttrs.expiration_date || "";
+    form.hidden = false;
+    this._perkModeChanged();
+    this.content.getElementById("perk-status").textContent = "";
+    form.elements.follow_main.focus();
+  }
+
+  _perkModeChanged() {
+    const form = this.content.getElementById("perk-form");
+    const follow = form.elements.follow_main.value === "true";
+    this.content.getElementById("perk-dates").hidden = follow;
+    for (const field of [form.elements.start_date, form.elements.expiration_date]) {
+      field.disabled = follow;
+      field.required = !follow;
+    }
+    const attrs = this._lastAttrs || {};
+    const perk = (attrs.accessories_list || []).find((item) => item.id === this._perkId);
+    const start = [attrs.renewal_period_start || attrs.current_period_start || attrs.purchase_date, perk?.purchase_date].filter(Boolean).sort().at(-1) || "";
+    this.content.getElementById("perk-period").hidden = !follow;
+    this.content.getElementById("perk-period").textContent = attrs.expiration_date ? `同步为 ${start} 至 ${attrs.expiration_date}` : "主服务未登记到期日，请先续订主服务，或选择独立期限。";
+    this.content.getElementById("perk-submit").textContent = follow ? "确认同步" : "确认登记";
+    this.content.getElementById("perk-help").textContent = follow ? "同步主服务当前登记的账期，以后主服务续订会自动更新此权益。仅记录赠送权益，不新增付款，也不会向平台续费。" : "按实际赠送期限登记，之后不随主服务自动续订。首次生效日期和旧账期会保留，权益价值不计入新增付款。";
+  }
+
+  async _submitPerk(event) {
+    event.preventDefault();
+    const form = this.content.getElementById("perk-form");
+    if (this._busy || !this._perkId || !form.reportValidity()) return;
+    const payload = dcPerkPayload(this._perkId, form.elements.follow_main.value === "true", form.elements.start_date.value, form.elements.expiration_date.value);
+    const signature = JSON.stringify(payload);
+    if (signature !== this._perkSignature) {
+      this._perkSignature = signature;
+      this._perkRequest = globalThis.crypto?.randomUUID?.() || `perk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    payload.request_id = this._perkRequest;
+    if (await this._callAction("renew_service_perk", payload)) {
+      form.hidden = true;
+      this._perkSignature = null;
+    }
   }
 
   _openPayment(type) {
     if (this._busy) return;
     const form = this.content.getElementById("payment-form");
     form.reset();
+    this.content.getElementById("perk-form").hidden = true;
     form.elements.bill_id.innerHTML = dcBills(this._lastAttrs || {}).filter((bill) => !bill.adjustment && bill.id).map((bill) => `<option value="${dcEscape(bill.id)}">${dcEscape(bill.paid_at || "日期缺失")} · ${dcEscape(dcBillLabels[bill.type] || "付款")} · ￥${dcNumber(bill.amount).toFixed(2)} · ${dcEscape(bill.id)}</option>`).join("");
     form.elements.charge_type.value = type;
     form.elements.cost.value = type === "renewal" ? dcNumber(this._lastAttrs?.renewal_price).toFixed(2) : "";
@@ -334,6 +428,7 @@ class DeviceCompanionCard extends HTMLElement {
   _paymentTypeChanged() {
     const form = this.content.getElementById("payment-form");
     const renewal = form.elements.charge_type.value === "renewal";
+    const correction = form.elements.charge_type.value === "correction";
     const adjustment = ["refund", "correction"].includes(form.elements.charge_type.value);
     this.content.getElementById("payment-bill").hidden = !adjustment;
     form.elements.bill_id.disabled = !adjustment;
@@ -341,19 +436,33 @@ class DeviceCompanionCard extends HTMLElement {
     form.elements.description.required = adjustment;
     form.elements.cost.min = form.elements.charge_type.value === "refund" ? "0.01" : "0";
     this.content.getElementById("payment-amount-label").textContent = form.elements.charge_type.value === "correction" ? "更正后的原付款总金额（元）" : form.elements.charge_type.value === "refund" ? "实际已收到退款（元）" : "实际已支付金额（元）";
-    this.content.getElementById("payment-help").textContent = adjustment ? "保留原账单并新增调整流水；费用按调整后的净额计算。到期日、套餐月费不变，已有退款的账单不能再更正。仅记账，不向平台申请退款。" : "此操作只登记已经支付的款项，不会向订阅平台付款。";
-    this.content.getElementById("payment-date-label").textContent = adjustment ? "调整日期" : "实际付款日期";
+    this.content.getElementById("payment-help").textContent = correction ? "可只更正日期，不必修改金额。订阅账期从更正后的实际付款日期开始，按原覆盖月数重算到期日；原错误账期将被替换，记录保留供追溯。已有退款的账单不能再更正，套餐月费不变。" : adjustment ? "保留原账单并记录实际收到的退款，净费用随之调整；付款日期、到期日和套餐月费不变。这里只记账，不向平台申请退款。" : renewal ? "实际付款日期就是本账期起点，到期日按覆盖月数计算。此操作只登记已付款，不会向订阅平台付款。" : "此操作只登记已经支付的款项，不会向订阅平台付款。";
+    this.content.getElementById("payment-date-label").textContent = correction ? "更正后的实际付款日期" : adjustment ? "实际收到退款的日期" : "实际付款日期";
     this.content.getElementById("payment-months").hidden = !renewal;
     this.content.getElementById("payment-monthly").hidden = form.elements.charge_type.value !== "upgrade";
     this.content.getElementById("payment-description").hidden = renewal;
     form.elements.months.disabled = !renewal;
     form.elements.months.required = renewal;
     form.elements.new_monthly_price.disabled = form.elements.charge_type.value !== "upgrade";
+    form.elements.paid_at.value = this._lastAttrs?.today || new Date().toLocaleDateString("en-CA");
+    if (correction) this._prefillBillCorrection();
+  }
+
+  _prefillBillCorrection() {
+    const form = this.content.getElementById("payment-form");
+    if (form.elements.charge_type.value !== "correction") return;
+    const attrs = this._lastAttrs || {};
+    const bill = dcBills(attrs).find((item) => !item.adjustment && item.id === form.elements.bill_id.value);
+    if (!bill) return;
+    const delta = (Array.isArray(attrs.service_adjustments) ? attrs.service_adjustments : []).filter((item) => item?.bill_id === bill.id).reduce((sum, item) => sum + dcNumber(item.amount), 0);
+    form.elements.cost.value = (dcNumber(bill.amount) + delta).toFixed(2);
+    form.elements.paid_at.value = bill.paid_at || "";
   }
 
   async _callAction(action, data = {}) {
     const services = {
       renew_service: "renew_service",
+      renew_service_perk: "renew_service_perk",
       record_service_charge: "record_service_charge",
       adjust_service_bill: "adjust_service_bill",
       replace_consumable: "replace_consumable",
@@ -362,7 +471,8 @@ class DeviceCompanionCard extends HTMLElement {
     const service = services[action];
     if (!service || !this.config?.entity || this._busy) return false;
     this._busy = true;
-    const status = this.content.getElementById("payment-status");
+    const isPerk = action === "renew_service_perk";
+    const status = this.content.getElementById(isPerk ? "perk-status" : "payment-status");
     status.textContent = "正在保存…";
     this.content.querySelectorAll("button").forEach((button) => { button.disabled = true; });
     try {
@@ -370,11 +480,11 @@ class DeviceCompanionCard extends HTMLElement {
       entity_id: this.config.entity,
       ...data,
       });
-      status.textContent = "已保存。账单将在实体更新后显示。";
+      status.textContent = isPerk ? "权益已更新，未新增付款。" : "已保存。账单将在实体更新后显示。";
       return true;
     } catch (error) {
       console.error("HomeAsset Companion service call failed", error);
-      status.textContent = `保存未确认：${error?.message || "请检查连接后重试"}。原表单已保留，重试同一笔不会重复记账。`;
+      status.textContent = `保存未确认：${error?.message || "请检查连接后重试"}。原表单已保留，${isPerk ? "可重试，不会新增付款" : "重试同一笔不会重复记账"}。`;
       return false;
     } finally {
       this._busy = false;
@@ -406,7 +516,7 @@ class DeviceCompanionCard extends HTMLElement {
     if (isService) {
       const labels = dcBillLabels;
       const bills = dcBills(attrs);
-      shadow.getElementById("bill-rows").innerHTML = `<p>到期提醒：${attrs.expiry_reminders ? "已开启（7 天、3 天、当天）" : "未开启，可在集成设置中开启"}</p>` + (bills.length ? bills.map((bill) => `<div class="bill-row">${dcEscape(bill.paid_at || "日期未记录")} · ${dcEscape(labels[bill.type] || "付款")} · ￥${dcNumber(bill.amount).toFixed(2)}${bill.coverage ? `<small>覆盖 ${dcEscape(bill.period_start)} 至 ${dcEscape(bill.period_end)} · ${dcNumber(bill.months_covered)} 个月</small>` : ""}${bill.description ? `<small>${dcEscape(bill.description)}</small>` : ""}${bill.adjustment ? `<small>关联原账单：${dcEscape(bill.bill_id)}</small>` : bill.id ? `<button type="button" class="action-btn-outline" data-bill-id="${dcEscape(bill.id)}" ${this._busy ? "disabled" : ""}>退款 / 更正</button>` : ""}</div>`).join("") : "<p>尚无付款明细。旧记录的累计投入保留，不会自动补造历史账单。</p>");
+      shadow.getElementById("bill-rows").innerHTML = `<p>到期提醒：${attrs.expiry_reminders ? "已开启（7 天、3 天、当天）" : "未开启，可在集成设置中开启"}</p>` + (bills.length ? bills.map((bill) => `<div class="bill-row">${dcEscape(bill.paid_at || "日期未记录")} · ${dcEscape(labels[bill.type] || "付款")} · ￥${dcNumber(bill.amount).toFixed(2)}${bill.coverage ? `<small>覆盖 ${dcEscape(bill.period_start)} 至 ${dcEscape(bill.period_end)} · ${dcNumber(bill.months_covered)} 个月</small>` : ""}${dcBillNote(bill) ? `<small>${dcEscape(dcBillNote(bill))}</small>` : ""}${bill.adjustment ? `<small>关联原账单：${dcEscape(bill.bill_id)}</small>` : bill.id ? `<button type="button" class="action-btn-outline" data-bill-id="${dcEscape(bill.id)}" ${this._busy ? "disabled" : ""}>退款 / 更正</button>` : ""}</div>`).join("") : "<p>尚无付款明细。旧记录的累计投入保留，不会自动补造历史账单。</p>");
     }
     const isMemorial = kind === "memorial";
     const isEvent = kind === "event" || attrs.is_event === true;
@@ -682,7 +792,7 @@ class DeviceCompanionCard extends HTMLElement {
         let metaHtml;
         if (isService) {
           priceHtml = `<div class="acc-value">权益价值 ￥${dcNumber(acc.price).toFixed(2)}</div>`;
-          metaHtml = `<span>${dcEscape(acc.purchase_date || "")}</span><span>${acc.expiration_date ? `至 ${dcEscape(acc.expiration_date)}` : "跟随主服务"}</span>`;
+          metaHtml = `<span>${dcEscape(acc.service_period_start || acc.purchase_date || "")}</span><span>${acc.expiration_date ? `至 ${dcEscape(acc.expiration_date)}` : "未登记到期日"}</span><span>${acc.follow_main_renewal === false ? "独立期限" : "随主服务续订"}</span>`;
         } else {
           priceHtml = `<div class="acc-price">净投入 ￥${dcNumber(acc.net_investment ?? acc.price).toFixed(2)}</div>`;
           metaHtml = `<span>${dcEscape(acc.purchase_date || "")}</span><span>${isMemorial ? "相伴" : "记录"} ${dcNumber(acc.days)} 天</span>`;
@@ -694,8 +804,10 @@ class DeviceCompanionCard extends HTMLElement {
           const ratio = Math.max(0, Math.min(1, dcNumber(acc.months_paid) / Math.max(1, dcNumber(acc.installment_months, 1))));
           installmentHtml = `<div style="display:flex;justify-content:space-between;font-size:.7rem;margin-top:8px;color:var(--dc-text-sub);width:100%;"><span>${dcNumber(acc.installment_interest) <= 0 ? "免息" : "分期"} (${dcNumber(acc.months_paid)}/${dcNumber(acc.installment_months)})</span><span>待还￥${dcNumber(acc.outstanding_balance).toFixed(2)}</span></div><div class="acc-inst-bar" style="width:100%;"><div class="acc-inst-fill" style="width:${ratio * 100}%;background-color:${ratio >= .33 ? "#2196F3" : "#FFC107"}!important;"></div></div>`;
         }
-        div.innerHTML = `${stamp}<div class="acc-top"><div class="acc-img-box">${iconHtml}</div><div class="acc-info"><div class="acc-name">${acc.is_wearing ? "✨ " : ""}${dcEscape(acc.name || "附属项目")}</div>${priceHtml}</div></div><div class="acc-meta">${metaHtml}</div>${installmentHtml}`;
+        const perkAction = isService && dcPerkCanRenew(acc, attrs) ? `<div class="perk-actions"><button type="button" class="action-btn-outline" data-perk-renew ${this._busy ? "disabled" : ""}>${acc.follow_main_renewal === false ? "登记续订" : "同步主服务"}</button></div>` : "";
+        div.innerHTML = `${stamp}<div class="acc-top"><div class="acc-img-box">${iconHtml}</div><div class="acc-info"><div class="acc-name">${acc.is_wearing ? "✨ " : ""}${dcEscape(acc.name || "附属项目")}</div>${priceHtml}</div></div><div class="acc-meta">${metaHtml}</div>${installmentHtml}${perkAction}`;
         accessoriesContainer.appendChild(div);
+        div.querySelector("[data-perk-renew]")?.addEventListener("click", () => this._openPerk(acc.id));
         const imageElement = div.querySelector("img.acc-actual-img");
         if (imageElement) imageElement.addEventListener("error", () => {
           imageElement.style.display = "none";
@@ -844,6 +956,6 @@ if (!window.customCards.some((card) => card.type === "device-companion-card")) {
     type: "device-companion-card",
     name: "HomeAsset Companion 详情卡",
     preview: true,
-    description: "v1.4.0：账单导出、退款与更正，延续原卡片设计。"
+    description: "v1.4.1b2：赠送权益随主服务续订，支持单独同步与独立期限。"
   });
 }

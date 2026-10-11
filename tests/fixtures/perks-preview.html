@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HomeAsset 赠送权益续订本地验证</title>
+<style>body{margin:20px;background:#eee;color:#333;font:16px system-ui}body.dark{background:#141516;color:#e8e8e8;--card-background-color:#202124;--primary-text-color:#e8e8e8;--secondary-text-color:#b0b0b0;--secondary-background-color:#303134}main{max-width:560px;margin:auto}main.mobile{max-width:390px}#calls{overflow-wrap:anywhere}button{padding:10px}device-companion-card{display:block;margin:16px 0}</style>
+<main><p>本地模拟验证，不连接真实 HA。主服务已续订到 2027-10-10，赠送音乐权益仍为旧日期。同步权益应更新日期且不新增付款。</p><button id="fail">模拟保存后断线一次</button><button id="theme">切换明暗主题</button><button id="width">切换桌面 / 390px</button><p id="calls">权益登记 0 次，新增付款 0 笔</p><device-companion-card></device-companion-card></main>
+<script type="module">
+import '/custom_components/device_companion/frontend/device-companion-card.js';
+const card=document.querySelector('device-companion-card');
+const attrs={integration_domain:'device_companion',friendly_name:'年度服务 · 赠送音乐VIP',kind:'service',category:'虚拟服务',today:'2026-10-11',purchase_date:'2025-10-08',expiration_date:'2027-10-10',status:'active',stored_status:'active',current_period_cost:300,service_period_months:12,plan_monthly_price:25,renewal_price:300,renewal_months:12,renewal_period_start:'2026-10-10',current_period_start:'2026-10-10',current_period_total_cost:300,current_period_base_monthly_cost:25,current_monthly_cost:25,main_net_investment:600,service_percent:99,service_remain_days:364,payment_coverage_end:'2027-10-10',payment_coverage_status:'ok',service_payments:[],service_charges:[],consumables_list:[],accessories_list:[{id:'music',name:'网易云音乐VIP',price:216,purchase_date:'2025-10-08',expiration_date:'2026-10-08',status:'expired',status_label:'已到期',is_retired:true}],badges:[]};
+let fail=false;
+const receipts=new Map();
+document.querySelector('#fail').onclick=()=>{fail=true;};
+const hass={states:{'sensor.preview':{state:'368',attributes:attrs}},callService:async (_domain,service,payload)=>{
+  if(service!=='renew_service_perk')throw new Error('此模拟页面仅允许登记权益，不记录付款');
+  if(!receipts.has(payload.request_id)){
+    const perk=attrs.accessories_list.find(item=>item.id===payload.perk_id);
+    if(!perk)throw new Error('找不到权益');
+    const start=payload.follow_main_renewal?attrs.renewal_period_start:payload.start_date;
+    const end=payload.follow_main_renewal?attrs.expiration_date:payload.expiration_date;
+    if(!start||!end||end<=start||end<=attrs.today)throw new Error('到期日须晚于生效日期和今天');
+    Object.assign(perk,{service_period_start:start,expiration_date:end,follow_main_renewal:payload.follow_main_renewal,status:'active',status_label:'正常使用',is_retired:false});
+    receipts.set(payload.request_id,{service,payload});
+  }
+  document.querySelector('#calls').textContent=`权益登记 ${receipts.size} 次，新增付款 0 笔`;
+  card.hass=hass;
+  if(fail){fail=false;throw new Error('模拟保存后连接中断');}
+}};
+card.setConfig({entity:'sensor.preview'});card.hass=hass;
+document.querySelector('#theme').onclick=()=>document.body.classList.toggle('dark');
+document.querySelector('#width').onclick=()=>document.querySelector('main').classList.toggle('mobile');
+</script>
+</html>

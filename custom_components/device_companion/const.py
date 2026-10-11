@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "device_companion"
-INTEGRATION_VERSION = "1.4.0"
+INTEGRATION_VERSION = "1.4.1b2"
 DATA_LOCKS = "entry_locks"
 
 CONF_DEVICE_NAME = "device_name"
@@ -47,6 +47,7 @@ TRACKING_MODE_MANUAL = "manual"
 TRACKING_MODE_SMART = "smart_percent"
 
 CONF_ACCESSORIES_LIST = "accessories_list"
+CONF_FOLLOW_MAIN_RENEWAL = "follow_main_renewal"
 CONF_STORY = "story"
 CONF_LOCATION = "location"
 CONF_LINKED_PRICE_ENTITY = "linked_price_entity"

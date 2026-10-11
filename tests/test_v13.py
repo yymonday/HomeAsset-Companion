@@ -56,6 +56,177 @@ def adjustment(operation="refund", cost=20.0, request_id="adjust-1", **extra):
 
 
 @pytest.mark.asyncio
+async def test_correct_actual_payment_date_replaces_old_coverage(service, monkeypatch):
+    from copy import deepcopy
+
+    entry, hass = service
+    entry.data.update(purchase_date="2026-06-28", total_price=280.0)
+    entry.options.update(
+        expiration_date="2026-10-30", service_period_start="2026-09-30",
+        current_period_cost=670.0, accumulated_cost=670.0,
+        service_payments=[
+            {"id": "history", "payment_type": "initial", "amount": 280.0,
+             "paid_at": "2026-06-28", "period_start": "2026-06-28",
+             "period_end": "2026-07-28", "months_covered": 1},
+            {"id": "current", "payment_type": "renewal", "amount": 670.0,
+             "paid_at": "2026-09-30", "period_start": "2026-09-30",
+             "period_end": "2026-10-30", "months_covered": 1},
+        ],
+        service_period_snapshots=[
+            {"period_start": "2026-09-30", "period_end": "2026-10-30",
+             "amount": 670.0, "months_covered": 1},
+        ],
+    )
+    monkeypatch.setattr(integration, "today_local", lambda: date(2026, 10, 11))
+    monkeypatch.setattr("custom_components.device_companion.sensor.today_local", lambda: date(2026, 10, 11))
+    original = deepcopy(entry.options["service_payments"])
+
+    await integration._handle_adjust_bill(hass, adjustment(
+        "correction", 670.0, "date-fix", bill_id="current",
+        paid_at="2026-10-11", corrected_paid_at="2026-10-09",
+    ))
+
+    assert entry.options["expiration_date"] == "2026-11-09"
+    assert entry.options["service_period_start"] == "2026-10-09"
+    assert entry.options["service_period_days"] == 31
+    assert entry.options["service_payments"] == original  # Audit source stays intact.
+    attrs = costs(entry, hass)
+    assert attrs["service_payments"][-1]["paid_at"] == "2026-10-09"
+    assert attrs["service_payments"][-1]["period_end"] == "2026-11-09"
+    assert attrs["payment_coverage_end"] == "2026-11-09"
+    assert attrs["current_period_start"] == "2026-10-09"
+    assert attrs["current_monthly_cost"] == 670.0
+    assert attrs["main_net_investment"] == 950.0
+    assert attrs["service_adjustments"][-1]["amount"] == 0
+    # The superseded September snapshot must not remain active before Oct 9.
+    monkeypatch.setattr("custom_components.device_companion.sensor.today_local", lambda: date(2026, 10, 5))
+    assert costs(entry, hass)["current_monthly_cost"] == 0
+
+
+@pytest.mark.asyncio
+async def test_date_revisions_replace_each_other_and_replay_after_restart(recorded_service):
+    from copy import deepcopy
+
+    entry, hass = recorded_service
+    original = deepcopy(entry.options["service_payments"])
+    first = adjustment("correction", 180, "date-1", corrected_paid_at="2026-09-09")
+    await asyncio.gather(*(integration._handle_adjust_bill(hass, first) for _ in range(2)))
+    assert len(entry.options["service_adjustments"]) == 1
+    assert costs(entry, hass)["current_period_start"] == "2026-09-09"
+    second = adjustment("correction", 180, "date-2", corrected_paid_at="2026-09-12")
+    await integration._handle_adjust_bill(hass, second)
+    hass.data["device_companion"]["entry_locks"] = {}
+    await integration._handle_adjust_bill(hass, second)
+    assert len(entry.options["service_adjustments"]) == 2
+    assert entry.options["service_payments"] == original
+    assert entry.options["expiration_date"] == "2026-10-12"
+    assert costs(entry, hass)["current_monthly_cost"] == 180
+    assert costs(entry, hass)["main_net_investment"] == 180
+    revision = entry.options["service_adjustments"][-1]["date_correction"]
+    assert revision["before"]["paid_at"] == "2026-09-09"
+    assert revision["after"]["paid_at"] == "2026-09-12"
+
+
+@pytest.mark.asyncio
+async def test_historical_date_correction_preserves_later_subscription(recorded_service):
+    entry, hass = recorded_service
+    await integration._handle_renew_service(hass, SimpleNamespace(data={"entity_id": "sensor.test", "months": 1, "cost": 200}))
+    later_period = entry.options["service_payments"][-1].copy()
+    await integration._handle_adjust_bill(hass, adjustment("correction", 140, corrected_paid_at="2026-09-20"))
+    assert entry.options["expiration_date"] == "2026-11-15"
+    assert entry.options["service_period_start"] == "2026-10-15"
+    assert entry.options["service_payments"][-1] == later_period
+    assert costs(entry, hass)["current_period_start"] == "2026-09-20"
+
+
+@pytest.mark.asyncio
+async def test_recorrecting_after_renewal_cannot_restore_superseded_snapshot(recorded_service, monkeypatch):
+    entry, hass = recorded_service
+    await integration._handle_adjust_bill(hass, adjustment("correction", 140, "before-renewal", corrected_paid_at="2026-09-09"))
+    await integration._handle_renew_service(hass, SimpleNamespace(data={"entity_id": "sensor.test", "months": 1, "cost": 200}))
+    await integration._handle_adjust_bill(hass, adjustment("correction", 140, "after-renewal", corrected_paid_at="2026-09-12"))
+    monkeypatch.setattr("custom_components.device_companion.sensor.today_local", lambda: date(2026, 9, 10))
+    assert costs(entry, hass)["current_monthly_cost"] == 0
+    assert entry.options["expiration_date"] == "2026-11-09"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [
+    {"corrected_paid_at": "2026-10-01"}, {"corrected_paid_at": "2026-08-14"},
+    {"corrected_paid_at": "bad"}, {"corrected_paid_at": "2026-08-15"},
+    {"operation": "refund", "corrected_paid_at": "2026-09-01"},
+])
+async def test_invalid_or_unchanged_date_revision_never_writes(recorded_service, extra):
+    from copy import deepcopy
+
+    entry, hass = recorded_service
+    before = deepcopy(entry.options)
+    with pytest.raises(ServiceValidationError):
+        await integration._handle_adjust_bill(hass, adjustment(**{"operation": "correction", "cost": 140, **extra}))
+    assert entry.options == before
+
+
+@pytest.mark.asyncio
+async def test_date_correction_requires_known_coverage_and_rejects_refunded_bill(recorded_service):
+    from copy import deepcopy
+
+    entry, hass = recorded_service
+    entry.options["service_payments"][0].pop("months_covered")
+    before = deepcopy(entry.options)
+    with pytest.raises(ServiceValidationError, match="覆盖月数"):
+        await integration._handle_adjust_bill(hass, adjustment("correction", 140, corrected_paid_at="2026-09-01"))
+    assert entry.options == before
+    entry.options["service_payments"][0]["months_covered"] = 1
+    await integration._handle_adjust_bill(hass, adjustment(cost=20))
+    before = deepcopy(entry.options)
+    with pytest.raises(ServiceValidationError, match="已有退款"):
+        await integration._handle_adjust_bill(hass, adjustment("correction", 140, "after-refund", corrected_paid_at="2026-09-01"))
+    assert entry.options == before
+
+
+@pytest.mark.asyncio
+async def test_charge_date_correction_moves_month_without_touching_expiry(recorded_service, monkeypatch):
+    entry, hass = recorded_service
+    await integration._handle_service_charge(hass, SimpleNamespace(data={"entity_id": "sensor.test", "cost": 40, "charge_type": "other", "paid_at": "2026-09-01"}))
+    charge = entry.options["service_charges"][0]
+    await integration._handle_adjust_bill(hass, adjustment("correction", 40, bill_id=charge["id"], corrected_paid_at="2026-08-20"))
+    assert entry.options["expiration_date"] == "2026-10-15"
+    assert charge["paid_at"] == "2026-09-01"
+    assert costs(entry, hass)["current_month_extra_cost"] == 0
+    monkeypatch.setattr("custom_components.device_companion.sensor.today_local", lambda: date(2026, 8, 25))
+    assert costs(entry, hass)["current_month_extra_cost"] == 40
+
+
+@pytest.mark.asyncio
+async def test_actual_date_can_correct_original_wrong_future_date(recorded_service):
+    entry, hass = recorded_service
+    entry.options["service_payments"][0]["paid_at"] = "2026-10-15"
+    await integration._handle_adjust_bill(hass, adjustment("correction", 140, corrected_paid_at="2026-09-09"))
+    assert entry.options["expiration_date"] == "2026-10-09"
+    assert costs(entry, hass)["service_payments"][0]["paid_at"] == "2026-09-09"
+
+
+@pytest.mark.asyncio
+async def test_corrected_expiry_replaces_calendar_and_reminder(recorded_service, monkeypatch):
+    entry, hass = recorded_service
+    notifications, dismissed = [], []
+    monkeypatch.setattr(integration.persistent_notification, "async_dismiss", lambda _hass, notification_id: dismissed.append(notification_id))
+    monkeypatch.setattr(integration.persistent_notification, "async_create", lambda _hass, message, **kwargs: notifications.append({"message": message, **kwargs}))
+    monkeypatch.setattr("custom_components.device_companion.reminders.today_local", lambda: date(2026, 9, 30))
+    entry.options.update(expiry_reminders=True, expiry_reminder_sent={"expiration": "2026-10-15", "thresholds": [7]})
+    await integration._handle_adjust_bill(hass, adjustment("correction", 140, corrected_paid_at="2026-09-01"))
+    assert dismissed == ["device_companion_expiry_v13"]
+    assert "expiry_reminder_sent" not in entry.options
+    events = DeviceCompanionCalendar(entry)._build_events(date(2026, 9, 30), date(2026, 10, 16))
+    assert [event.start for event in events] == [date(2026, 10, 1)]
+    await async_check_expiry(hass, entry)
+    await async_check_expiry(hass, entry)
+    assert len(notifications) == 1
+    assert "2026-10-01" in notifications[0]["message"]
+    assert "2026-10-15" not in notifications[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_refund_preserves_original_and_coverage_replay_after_restart(recorded_service):
     from copy import deepcopy
     entry, hass = recorded_service
@@ -232,6 +403,34 @@ async def test_backdated_charge_belongs_to_payment_month(service):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expiration", ["2026-09-29", "2026-10-15"])
+async def test_explicit_actual_payment_starts_renewal_not_today_or_old_expiry(service, expiration):
+    entry, hass = service
+    entry.options["expiration_date"] = expiration
+    await integration._handle_renew_service(hass, SimpleNamespace(data={
+        "entity_id": "sensor.test", "cost": 140, "months": 1, "paid_at": "2026-09-28",
+    }))
+    assert entry.options["service_period_start"] == "2026-09-28"
+    assert entry.options["expiration_date"] == "2026-10-28"
+    assert costs(entry, hass)["current_period_start"] == "2026-09-28"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("day,months,expected", [
+    ("2026-01-31", 1, "2026-02-28"), ("2028-01-31", 1, "2028-02-29"),
+    ("2026-12-31", 2, "2027-02-28"),
+])
+async def test_date_correction_uses_calendar_month_boundaries(recorded_service, monkeypatch, day, months, expected):
+    entry, hass = recorded_service
+    entry.data["purchase_date"] = "2020-01-01"
+    entry.options["service_payments"][0]["months_covered"] = months
+    monkeypatch.setattr(integration, "today_local", lambda: date(2028, 2, 1))
+    await integration._handle_adjust_bill(hass, adjustment("correction", 140, paid_at="2028-02-01", corrected_paid_at=day))
+    assert entry.options["expiration_date"] == expected
+    assert entry.options["service_period_start"] == day
+
+
+@pytest.mark.asyncio
 async def test_future_payment_rejected_without_mutation(service):
     entry, hass = service
     before = dict(entry.options)
@@ -314,6 +513,48 @@ async def test_real_config_and_options_flow_preserves_identity(hass, enable_cust
     assert entry.options["expiry_reminders"] is True
     assert entry.options["service_payments"] == before_payments
     assert registry.async_get_entity_id("sensor", "device_companion", f"companion_{entry.entry_id}") == entity_id
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_real_date_correction_service_reload_and_entity_identity(hass, enable_custom_integrations, monkeypatch):
+    from copy import deepcopy
+    from homeassistant.helpers import entity_registry as er
+
+    monkeypatch.setattr(integration, "today_local", lambda: date(2026, 9, 30))
+    monkeypatch.setattr("custom_components.device_companion.sensor.today_local", lambda: date(2026, 9, 30))
+    flow = await hass.config_entries.flow.async_init("device_companion", context={"source": "user"})
+    flow = await hass.config_entries.flow.async_configure(flow["flow_id"], {"category": "虚拟服务"})
+    result = await hass.config_entries.flow.async_configure(flow["flow_id"], {
+        "device_name": "日期纠错订阅", "purchase_date": "2026-09-12", "total_price": 280.0,
+        "plan_monthly_price": 140.0, "sub_period": "1个月", "service_period_months": 2,
+    })
+    entry = result["result"]
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id("sensor", "device_companion", f"companion_{entry.entry_id}")
+    calendar_id = registry.async_get_entity_id("calendar", "device_companion", f"calendar_{entry.entry_id}")
+    original_data, original_bills = deepcopy(dict(entry.data)), deepcopy(entry.options["service_payments"])
+    payload = {"entity_id": entity_id, "bill_id": original_bills[0]["id"], "operation": "correction",
+               "cost": 280, "corrected_paid_at": "2026-09-15", "description": "更正实际付款日期", "request_id": "real-date-fix"}
+    await hass.services.async_call("device_companion", "adjust_service_bill", payload, blocking=True)
+    await hass.async_block_till_done()
+    assert entry.options["expiration_date"] == "2026-11-15"
+    assert entry.options["service_payments"] == original_bills
+    assert dict(entry.data) == original_data
+    attrs = hass.states.get(entity_id).attributes
+    assert attrs["service_payments"][0]["paid_at"] == "2026-09-15"
+    assert attrs["current_period_start"] == "2026-09-15"
+    assert attrs["current_monthly_cost"] == 140
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await hass.services.async_call("device_companion", "adjust_service_bill", payload, blocking=True)
+    await hass.async_block_till_done()
+    assert len(entry.options["service_adjustments"]) == 1
+    assert registry.async_get_entity_id("sensor", "device_companion", f"companion_{entry.entry_id}") == entity_id
+    assert registry.async_get_entity_id("calendar", "device_companion", f"calendar_{entry.entry_id}") == calendar_id
+    assert hass.states.get(entity_id).attributes["expiration_date"] == "2026-11-15"
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 

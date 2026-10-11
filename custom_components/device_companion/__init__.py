@@ -14,6 +14,7 @@ import uuid
 from aiohttp import web
 import voluptuous as vol
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
@@ -28,6 +29,7 @@ from .const import (
     CONF_CONSUMABLES_LIST,
     CONF_CURRENT_PERIOD_COST,
     CONF_EXPIRATION_DATE,
+    CONF_FOLLOW_MAIN_RENEWAL,
     CONF_KIND,
     CONF_PLAN_MONTHLY_PRICE,
     CONF_RECOVERY_AMOUNT,
@@ -50,9 +52,12 @@ from .const import (
 )
 from .helpers import (
     add_months_to_date,
+    effective_service_records,
     infer_kind,
+    is_terminal_status,
     legacy_status,
     normalize_status_record,
+    renew_perk_record,
     safe_date,
     safe_float,
     safe_int,
@@ -71,6 +76,7 @@ ALLOWED_STATUS_VALUES = list(STATUS_LABELS)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 SERVICE_RENEW = "renew_service"
+SERVICE_RENEW_PERK = "renew_service_perk"
 SERVICE_RECORD_CHARGE = "record_service_charge"
 SERVICE_ADJUST_BILL = "adjust_service_bill"
 SERVICE_REPLACE = "replace_consumable"
@@ -104,6 +110,13 @@ RENEW_SCHEMA = TARGET_SCHEMA.extend(
         vol.Optional(CONF_EXPIRATION_DATE): cv.date,
     }
 )
+RENEW_PERK_SCHEMA = TARGET_SCHEMA.extend({
+    vol.Required("perk_id"): vol.All(cv.string, vol.Length(min=1, max=100)),
+    vol.Optional("request_id"): vol.All(cv.string, vol.Length(min=1, max=100)),
+    vol.Optional(CONF_FOLLOW_MAIN_RENEWAL, default=True): cv.boolean,
+    vol.Optional("start_date"): cv.date,
+    vol.Optional(CONF_EXPIRATION_DATE): cv.date,
+})
 SERVICE_CHARGE_SCHEMA = TARGET_SCHEMA.extend(
     {
         **PAYMENT_FIELDS,
@@ -121,6 +134,7 @@ ADJUST_BILL_SCHEMA = TARGET_SCHEMA.extend({
     vol.Required("operation"): vol.In(("refund", "correction")),
     vol.Required("cost"): _finite_amount,
     vol.Optional("paid_at"): cv.date,
+    vol.Optional("corrected_paid_at"): cv.date,
     vol.Required("description"): vol.All(cv.string, vol.Length(min=1, max=200)),
 })
 REPLACE_SCHEMA = TARGET_SCHEMA.extend(
@@ -307,6 +321,9 @@ def _register_services(hass: HomeAssistant) -> None:
     async def handle_charge(call: ServiceCall) -> None:
         await _handle_service_charge(hass, call)
 
+    async def handle_perk(call: ServiceCall) -> None:
+        await _handle_renew_perk(hass, call)
+
     async def handle_adjust(call: ServiceCall) -> None:
         await _handle_adjust_bill(hass, call)
 
@@ -323,6 +340,7 @@ def _register_services(hass: HomeAssistant) -> None:
         await _handle_legacy_quick_action(hass, call)
 
     hass.services.async_register(DOMAIN, SERVICE_RENEW, handle_renew, schema=RENEW_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_RENEW_PERK, handle_perk, schema=RENEW_PERK_SCHEMA)
     hass.services.async_register(
         DOMAIN, SERVICE_RECORD_CHARGE, handle_charge, schema=SERVICE_CHARGE_SCHEMA
     )
@@ -365,10 +383,14 @@ async def _update_options(
         if latest is None:
             raise ServiceValidationError("目标配置条目已经不存在")
         options = deepcopy(dict(latest.options))
+        old_expiration = latest.options.get(CONF_EXPIRATION_DATE)
+        old_reminder = latest.options.get("expiry_reminder_sent")
         changed = mutator(options)
         if changed is False:
             return
         hass.config_entries.async_update_entry(latest, options=options)
+        if old_reminder and old_expiration != options.get(CONF_EXPIRATION_DATE):
+            persistent_notification.async_dismiss(hass, f"{DOMAIN}_expiry_{entry.entry_id}")
 
 
 def _service_standard_months(options: dict) -> int:
@@ -420,6 +442,70 @@ def _paid_date(call, today):
     return paid
 
 
+def _renew_following_perks(options: dict, start, end, today, source: str) -> None:
+    """Renew eligible gifts atomically with their parent; never restore canceled items."""
+    accessories = options.get(CONF_ACCESSORIES_LIST)
+    if not isinstance(accessories, list):
+        return
+    for index, item in enumerate(accessories):
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        if not item.get(CONF_FOLLOW_MAIN_RENEWAL, True) or is_terminal_status(legacy_status(item)):
+            continue
+        purchase = safe_date(item.get("purchase_date"), start)
+        perk_start = max(start, purchase)
+        if perk_start >= end:
+            continue
+        accessories[index] = renew_perk_record(
+            item, perk_start, end, follow_main=True, changed_at=today, source=source
+        )
+
+
+async def _handle_renew_perk(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Sync or independently renew a free benefit without adding a parent payment."""
+    entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
+    if infer_kind(dict(entry.data)) != KIND_SERVICE:
+        raise ServiceValidationError("只有虚拟服务的赠送权益可以续订")
+
+    def mutate(options: dict):
+        if not _payment_request(options, call, SERVICE_RENEW_PERK):
+            return False
+        if is_terminal_status(legacy_status(options)):
+            raise ServiceValidationError("主服务已停止，请先恢复主服务")
+        accessories = options.get(CONF_ACCESSORIES_LIST)
+        matches = [(index, item) for index, item in enumerate(accessories if isinstance(accessories, list) else [])
+                   if isinstance(item, dict) and item.get("id") == call.data["perk_id"]]
+        if len(matches) != 1:
+            raise ServiceValidationError("找不到唯一的赠送权益，请刷新后重试")
+        index, item = matches[0]
+        if is_terminal_status(legacy_status(item)):
+            raise ServiceValidationError("该权益已取消或停止，请先在集成设置中恢复")
+        today = today_local()
+        follow = call.data.get(CONF_FOLLOW_MAIN_RENEWAL, True)
+        purchase = safe_date(item.get("purchase_date"))
+        if follow:
+            if "start_date" in call.data or CONF_EXPIRATION_DATE in call.data:
+                raise ServiceValidationError("跟随主服务时无需填写独立日期")
+            start = safe_date(options.get("service_period_start"), safe_date(entry.data.get("purchase_date")))
+            end = safe_date(options.get(CONF_EXPIRATION_DATE))
+            if purchase and start:
+                start = max(start, purchase)
+        else:
+            start = safe_date(call.data.get("start_date"))
+            end = safe_date(call.data.get(CONF_EXPIRATION_DATE))
+        if start is None or end is None or end <= start or end <= today:
+            raise ServiceValidationError("请填写有效的权益账期，到期日须晚于起始日和今天；跟随模式请先续订主服务")
+        if purchase and start < purchase:
+            raise ServiceValidationError("权益账期不能早于首次生效日期")
+        updated = renew_perk_record(item, start, end, follow_main=follow,
+                                   changed_at=today, source="sync_main" if follow else "manual")
+        if updated == item and not call.data.get("request_id"):
+            return False
+        accessories[index] = updated
+
+    await _update_options(hass, entry, mutate)
+
+
 async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
     if infer_kind(dict(entry.data)) != KIND_SERVICE:
@@ -433,8 +519,9 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
         if paid_at < safe_date(entry.data.get("purchase_date"), paid_at):
             raise ServiceValidationError("付款日期不能早于服务起始日期")
         explicit_expiration = safe_date(call.data.get(CONF_EXPIRATION_DATE))
-        if explicit_expiration and explicit_expiration <= today:
-            raise ServiceValidationError("新的到期日必须晚于今天")
+        date_anchor = paid_at if "paid_at" in call.data else today
+        if explicit_expiration and explicit_expiration <= date_anchor:
+            raise ServiceValidationError("新的到期日必须晚于账期起始日期" if "paid_at" in call.data else "新的到期日必须晚于今天")
 
         requested_months = call.data.get("months")
         if requested_months is None:
@@ -442,17 +529,17 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
                 options.get(CONF_SUB_PERIOD, "1个月"), 1
             )
         coverage_months = max(1, int(requested_months))
-        period_start = today
+        period_start = date_anchor
         if explicit_expiration:
             new_expiration = explicit_expiration
             period_days = max(1, (new_expiration - period_start).days)
             # The date does not prove how many months the payment purchased.
         else:
             current_expiration = safe_date(options.get(CONF_EXPIRATION_DATE), today)
-            base_date = (
-                current_expiration
-                if current_expiration and current_expiration > today
-                else today
+            # Explicit actual-payment dates start that paid period. Keep the
+            # extension behavior for legacy calls that omit the date entirely.
+            base_date = paid_at if "paid_at" in call.data else (
+                current_expiration if current_expiration and current_expiration > today else today
             )
             period_start = base_date
             new_expiration = add_months_to_date(base_date, coverage_months)
@@ -508,6 +595,7 @@ async def _handle_renew_service(hass: HomeAssistant, call: ServiceCall) -> None:
         )
         options[CONF_SERVICE_PAYMENTS] = payments
         options.update(normalize_status_record(options, STATUS_ACTIVE, changed_at=today))
+        _renew_following_perks(options, period_start, new_expiration, today, "main_renewal")
 
     await _update_options(hass, entry, mutate)
 
@@ -585,7 +673,7 @@ def _bill_money(value) -> Decimal:
 
 
 async def _handle_adjust_bill(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Append an immutable linked adjustment, without altering paid coverage."""
+    """Append a linked amount/date revision and replace superseded coverage."""
     entry = await _resolve_target_entry(hass, call.data[ATTR_ENTITY_ID])
     if infer_kind(dict(entry.data)) != KIND_SERVICE:
         raise ServiceValidationError("只有虚拟服务账单可以退款或更正")
@@ -595,14 +683,16 @@ async def _handle_adjust_bill(hass: HomeAssistant, call: ServiceCall) -> None:
             return False
         bill_id = call.data["bill_id"]
         matches = [(bill, key) for field, key in ((CONF_SERVICE_PAYMENTS, "amount"), (CONF_SERVICE_CHARGES, "cost"))
-                   for bill in safe_record_list(options.get(field)) if bill.get("id") == bill_id]
+                   for bill in effective_service_records(options, field) if bill.get("id") == bill_id]
         if len(matches) != 1:
             raise ServiceValidationError("找不到唯一原账单；旧未追踪费用不能直接调整")
         bill, amount_key = matches[0]
         original = _bill_money(bill.get(amount_key))
-        paid_at = _paid_date(call, today_local())
+        today = today_local()
+        paid_at = _paid_date(call, today)
         original_date = safe_date(bill.get("paid_at"))
-        if original_date is None or paid_at < original_date:
+        has_date_correction = call.data["operation"] == "correction" and "corrected_paid_at" in call.data
+        if not has_date_correction and (original_date is None or paid_at < original_date):
             raise ServiceValidationError("调整日期不能早于原付款日期；缺失付款日期需先核对")
         description = str(call.data.get("description", "")).strip()
         if not description:
@@ -624,25 +714,68 @@ async def _handle_adjust_bill(hass: HomeAssistant, call: ServiceCall) -> None:
             raise ServiceValidationError("调整日期不能早于该账单已有调整日期")
         requested = _bill_money(call.data["cost"])
         operation = call.data["operation"]
+        date_correction = None
+        corrected_date = safe_date(call.data.get("corrected_paid_at"))
+        if "corrected_paid_at" in call.data:
+            if operation != "correction":
+                raise ServiceValidationError("只有更正账单可以修改实际付款日期")
+            if corrected_date is None or corrected_date > today:
+                raise ServiceValidationError("更正后的实际付款日期必须有效，且不能晚于今天")
+            if corrected_date < safe_date(entry.data.get("purchase_date"), corrected_date):
+                raise ServiceValidationError("实际付款日期不能早于服务起始日期")
+            if corrected_date > paid_at:
+                raise ServiceValidationError("更正记录日期不能早于实际付款日期")
+            if corrected_date != original_date:
+                if amount_key == "amount":
+                    months = safe_int(bill.get("months_covered"))
+                    if not 1 <= months <= 120:
+                        raise ServiceValidationError("原账单缺少有效覆盖月数，不能推算更正后的到期日")
+                    new_start = corrected_date
+                    new_end = add_months_to_date(new_start, months)
+                else:
+                    new_start = corrected_date.replace(day=1)
+                    new_end = add_months_to_date(new_start, 1) - timedelta(days=1)
+                    expiration = safe_date(options.get(CONF_EXPIRATION_DATE))
+                    if expiration and expiration >= corrected_date:
+                        new_end = min(new_end, expiration)
+                date_correction = {
+                    "before": {key: bill.get(key) for key in ("paid_at", "period_start", "period_end")},
+                    "after": {"paid_at": str(corrected_date), "period_start": str(new_start), "period_end": str(new_end)},
+                }
         if operation == "refund":
             if requested <= 0 or requested > original + corrections - refunds:
                 raise ServiceValidationError("退款金额必须大于零，且不能超过原账单剩余净额")
             delta = -requested
         elif operation == "correction":
             if refunds:
-                raise ServiceValidationError("该账单已有退款，不能再更正原付款金额")
+                raise ServiceValidationError("该账单已有退款，不能再更正原账单")
             delta = requested - original - corrections
-            if delta == 0:
-                raise ServiceValidationError("更正后金额未发生变化")
+            if delta == 0 and date_correction is None:
+                raise ServiceValidationError("更正后金额和实际付款日期均未发生变化")
         else:
             raise ServiceValidationError("不支持的账单调整类型")
         total_delta = sum((signed_amount(item) for item in adjustments), Decimal(0)) + delta
         gross = Decimal(str(safe_float(entry.data.get(CONF_TOTAL_PRICE)))) + Decimal(str(safe_float(options.get("accumulated_cost"))))
         if gross + total_delta < 0:
             raise ServiceValidationError("调整将使累计净投入为负，请先核对原始账单")
-        adjustments.append({"id": f"adjust_{uuid.uuid4().hex[:12]}", "bill_id": bill_id,
-                            "operation": operation, "amount": float(delta), "paid_at": str(paid_at),
-                            "description": description})
+        revision = {"id": f"adjust_{uuid.uuid4().hex[:12]}", "bill_id": bill_id,
+                    "operation": operation, "amount": float(delta), "paid_at": str(paid_at),
+                    "description": description}
+        if date_correction:
+            revision["date_correction"] = date_correction
+            payments = effective_service_records(options, CONF_SERVICE_PAYMENTS)
+            owner = next((item for item in reversed(payments)
+                          if item.get("period_start") == options.get("service_period_start")),
+                         payments[-1] if payments else None)
+            if amount_key == "amount" and owner and owner.get("id") == bill_id:
+                options["service_period_start"] = str(new_start)
+                options[CONF_EXPIRATION_DATE] = str(new_end)
+                options["service_period_days"] = (new_end - new_start).days
+                options[CONF_SERVICE_PERIOD_MONTHS] = months
+                options[CONF_CURRENT_PERIOD_COST] = float(requested)
+                options.pop("expiry_reminder_sent", None)
+                _renew_following_perks(options, new_start, new_end, today, "main_date_correction")
+        adjustments.append(revision)
         options["service_adjustments"] = adjustments
 
     await _update_options(hass, entry, mutate)

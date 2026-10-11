@@ -2,16 +2,17 @@
 <html lang="zh-CN">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HomeAsset v1.3 本地验证</title>
-<style>body{margin:20px;background:#eee;color:#333;font:16px system-ui}body.dark{background:#141516;color:#e8e8e8;--card-background-color:#202124;--primary-text-color:#e8e8e8;--secondary-text-color:#b0b0b0;--secondary-background-color:#303134}main{max-width:420px;margin:auto}#calls{overflow-wrap:anywhere}button{padding:10px}device-companion-card{display:block;margin:16px 0}</style>
-<main><p>本地模拟验证，不连接实际 Home Assistant。</p><button id="fail">模拟保存后连接中断一次</button><button id="no-expiry">切换无到期日</button><button id="theme">切换明暗主题</button><p id="calls">已记账 0 笔</p><device-companion-card></device-companion-card></main>
+<title>HomeAsset 付款日期更正本地验证</title>
+<style>body{margin:20px;background:#eee;color:#333;font:16px system-ui}body.dark{background:#141516;color:#e8e8e8;--card-background-color:#202124;--primary-text-color:#e8e8e8;--secondary-text-color:#b0b0b0;--secondary-background-color:#303134}main{max-width:560px;margin:auto}main.mobile{max-width:390px}#calls{overflow-wrap:anywhere}button{padding:10px}device-companion-card{display:block;margin:16px 0}</style>
+<main><p>本地模拟验证，不连接实际 Home Assistant。将原账单实际付款日期更正为 2026-10-09，覆盖 1 个月，到期应为 2026-11-09。</p><button id="fail">模拟保存后连接中断一次</button><button id="no-expiry">切换无到期日</button><button id="theme">切换明暗主题</button><button id="width">切换桌面 / 390px</button><p id="calls">已记账 0 笔</p><device-companion-card></device-companion-card></main>
 <script type="module">
 import '/custom_components/device_companion/frontend/device-companion-card.js';
 const card=document.querySelector('device-companion-card');
-const attrs={integration_domain:'device_companion',friendly_name:'ChatGPT Plus',kind:'service',category:'虚拟服务',today:'2026-09-30',purchase_date:'2026-09-12',expiration_date:'2026-11-12',status:'active',stored_status:'active',current_period_cost:280,service_period_months:2,plan_monthly_price:140,renewal_price:140,renewal_months:1,current_period_total_cost:280,current_period_base_monthly_cost:140,current_monthly_cost:140,service_percent:70,service_remain_days:43,payment_coverage_status:'ok',expiry_reminders:true,service_payments:[{id:'first',payment_type:'initial',amount:280,paid_at:'2026-09-12',period_start:'2026-09-12',period_end:'2026-11-12',months_covered:2,description:'首次预付'}],service_charges:[],consumables_list:[],accessories_list:[],badges:[]};
+const attrs={integration_domain:'device_companion',friendly_name:'ChatGPT Plus',kind:'service',category:'虚拟服务',today:'2026-10-11',purchase_date:'2026-06-28',expiration_date:'2026-10-30',status:'active',stored_status:'active',current_period_cost:670,service_period_months:1,plan_monthly_price:140,renewal_price:140,renewal_months:1,current_period_start:'2026-09-30',current_period_total_cost:670,current_period_base_monthly_cost:670,current_monthly_cost:670,service_percent:63,service_remain_days:19,payment_coverage_end:'2026-10-30',payment_coverage_status:'ok',expiry_reminders:true,service_payments:[{id:'first',payment_type:'renewal',amount:670,paid_at:'2026-09-30',period_start:'2026-09-30',period_end:'2026-10-30',months_covered:1,description:'续订服务'}],service_charges:[],consumables_list:[],accessories_list:[],badges:[]};
+const addMonths=(value,months)=>{const [y,m,d]=value.split('-').map(Number);const last=new Date(Date.UTC(y,m-1+months+1,0)).getUTCDate();return new Date(Date.UTC(y,m-1+months,Math.min(d,last))).toISOString().slice(0,10);};
 let fail=false;
 attrs.service_adjustments=[];
-attrs.main_net_investment=280;
+attrs.main_net_investment=950;
 const receipts=new Map();
 document.querySelector('#fail').onclick=()=>{fail=true;};
 const hass={states:{'sensor.preview':{state:'18',attributes:attrs}},callService:async (_domain,service,payload)=>{
@@ -26,11 +27,23 @@ const hass={states:{'sensor.preview':{state:'18',attributes:attrs}},callService:
       if(payload.operation==='refund'&&(payload.cost<=0||payload.cost>balance))throw new Error('退款不能超过剩余净额');
       if(payload.operation==='correction'&&related.some(bill=>bill.operation==='refund'))throw new Error('该账单已有退款，不能更正');
       const amount=payload.operation==='refund'?-payload.cost:payload.cost-balance;
-      attrs.service_adjustments.push({id:payload.request_id,bill_id:original.id,operation:payload.operation,amount,paid_at:payload.paid_at,description:payload.description});
-      attrs.main_net_investment=280+attrs.service_adjustments.reduce((sum,bill)=>sum+bill.amount,0);
-      attrs.current_period_cost=attrs.main_net_investment;
-      attrs.current_period_total_cost=attrs.main_net_investment;
-      attrs.current_monthly_cost=attrs.main_net_investment/2;
+      const revision={id:payload.request_id,bill_id:original.id,operation:payload.operation,amount,paid_at:payload.paid_at||attrs.today,description:payload.description};
+      if(payload.corrected_paid_at&&payload.corrected_paid_at!==original.paid_at){
+        const before={paid_at:original.paid_at,period_start:original.period_start,period_end:original.period_end};
+        const after={paid_at:payload.corrected_paid_at,period_start:payload.corrected_paid_at,period_end:addMonths(payload.corrected_paid_at,original.months_covered)};
+        revision.date_correction={before,after};
+        // This is the effective UI view, not the immutable persisted audit source.
+        Object.assign(original,after);
+        attrs.current_period_start=after.period_start;
+        attrs.expiration_date=attrs.payment_coverage_end=after.period_end;
+        attrs.service_remain_days=Math.round((new Date(after.period_end)-new Date(attrs.today))/86400000);
+        attrs.service_percent=Math.round(attrs.service_remain_days/((new Date(after.period_end)-new Date(after.period_start))/86400000)*100);
+      }
+      attrs.service_adjustments.push(revision);
+      attrs.main_net_investment=950+attrs.service_adjustments.reduce((sum,bill)=>sum+bill.amount,0);
+      attrs.current_period_cost=balance+amount;
+      attrs.current_period_total_cost=balance+amount;
+      attrs.current_monthly_cost=attrs.current_period_base_monthly_cost=(balance+amount)/original.months_covered;
     }
     else attrs.service_payments.push({id:payload.request_id,payment_type:'renewal',amount:payload.cost,paid_at:payload.paid_at,period_start:'2026-11-12',period_end:'2026-12-12',months_covered:payload.months});
     receipts.set(payload.request_id,{service,payload});
@@ -39,8 +52,9 @@ const hass={states:{'sensor.preview':{state:'18',attributes:attrs}},callService:
   card.hass=hass;
   if(fail){fail=false;throw new Error('模拟保存后连接中断');}
 }};
-card.setConfig({entity:'sensor.preview'});card.hass=hass;
+card.setConfig({entity:'sensor.preview'});hass.states['sensor.preview'].state='105';card.hass=hass;
 document.querySelector('#no-expiry').onclick=()=>{attrs.expiration_date='';card.hass=hass;};
 document.querySelector('#theme').onclick=()=>document.body.classList.toggle('dark');
+document.querySelector('#width').onclick=()=>document.querySelector('main').classList.toggle('mobile');
 </script>
 </html>

@@ -29,6 +29,7 @@ from .const import (
     CONF_EARLY_PAYOFF,
     CONF_EARLY_PAYOFF_FEE,
     CONF_EXPIRATION_DATE,
+    CONF_FOLLOW_MAIN_RENEWAL,
     CONF_INSTALLMENT_INTEREST,
     CONF_INSTALLMENT_MONTHS,
     CONF_IS_EVENT,
@@ -833,6 +834,9 @@ class DeviceCompanionOptionsFlowHandler(config_entries.OptionsFlow):
                 )
                 if kind == KIND_SERVICE:
                     item[CONF_EXPIRATION_DATE] = str(user_input.get(CONF_EXPIRATION_DATE, ""))
+                    item[CONF_FOLLOW_MAIN_RENEWAL] = user_input.get(
+                        CONF_FOLLOW_MAIN_RENEWAL, current.get(CONF_FOLLOW_MAIN_RENEWAL, True)
+                    )
                 elif kind == KIND_MEMORIAL:
                     item["is_wearing"] = user_input.get("is_wearing", False)
                 else:
@@ -870,6 +874,7 @@ class DeviceCompanionOptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional("image", default=current.get("image", "")): str,
         }
         if kind == KIND_SERVICE:
+            schema[vol.Optional(CONF_FOLLOW_MAIN_RENEWAL, default=current.get(CONF_FOLLOW_MAIN_RENEWAL, True))] = bool
             schema[
                 vol.Optional(
                     CONF_EXPIRATION_DATE,

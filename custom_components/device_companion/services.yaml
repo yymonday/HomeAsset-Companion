@@ -1,6 +1,6 @@
 adjust_service_bill:
   name: 退款或更正订阅账单
-  description: 保留原账单，新增关联调整流水并调整净投入和原账期费用；不改变到期日或套餐月费。仅记账，不向平台申请退款。已有退款的账单不能更正。
+  description: 保留原账单并新增关联更正记录。金额按差额调整；更正实际付款日期时替换原账期，按原覆盖月数重算到期日。退款不改变账期，套餐月费不变。仅记账，不向平台申请退款。已有退款的账单不能更正。
   fields:
     entity_id:
       name: 陪伴实体
@@ -21,7 +21,7 @@ adjust_service_bill:
           options:
             - label: 退款
               value: refund
-            - label: 金额更正
+            - label: 更正金额 / 付款日期
               value: correction
     cost:
       name: 退款金额或更正后的原付款总金额
@@ -34,8 +34,13 @@ adjust_service_bill:
           step: 0.01
           mode: box
     paid_at:
-      name: 调整日期
+      name: 调整记录日期 / 收到退款的日期
       description: 默认今天，不得早于原付款或已有调整日期，也不能晚于今天。
+      selector:
+        date:
+    corrected_paid_at:
+      name: 更正后的实际付款日期
+      description: 仅 correction 使用，可早于原错误付款日期，但不得早于服务首次起始日或晚于今天。付款日期就是该订阅账期起点，按原覆盖月数重算到期日；只改日期时金额填写当前更正后的原付款总额。留空只更正金额。
       selector:
         date:
     description:
@@ -61,7 +66,7 @@ renew_service:
         text:
     paid_at:
       name: 实际付款日期
-      description: 留空使用今天，不能填写未来日期或早于服务起始日期。
+      description: 填写时用作该账期起点，按覆盖月数计算到期日；不能填写未来日期或早于服务首次起始日。省略此字段的旧服务调用仍从有效到期日续期。
       selector:
         date:
     entity_id:
@@ -98,6 +103,43 @@ renew_service:
       required: false
       selector:
         date:
+
+renew_service_perk:
+  name: 续订赠送权益
+  description: 同步主服务已登记的账期，或单独登记赠送权益的期限。不新增付款，不改变主服务日期或权益价值，保留首次生效日期和旧账期。已取消的权益须先在集成设置中恢复。
+  fields:
+    entity_id:
+      name: 主服务陪伴实体
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    perk_id:
+      name: 权益 ID
+      required: true
+      selector:
+        text:
+    follow_main_renewal:
+      name: 跟随主服务续订
+      description: 默认开启，同步当前已登记的主服务账期，并在今后主服务续订或更正当前付款日期时自动同步。
+      default: true
+      selector:
+        boolean:
+    start_date:
+      name: 独立权益生效日期
+      description: 仅关闭跟随时填写，不得早于首次生效日期。
+      selector:
+        date:
+    expiration_date:
+      name: 独立到期日
+      description: 仅关闭跟随时填写，须晚于生效日期和今天。
+      selector:
+        date:
+    request_id:
+      name: 操作请求编号
+      description: 重试同一操作时沿用编号，防止重复登记。
+      selector:
+        text:
 
 record_service_charge:
   name: 记录订阅附加支出

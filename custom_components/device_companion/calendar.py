@@ -29,6 +29,7 @@ from .helpers import (
     infer_kind,
     is_terminal_status,
     legacy_status,
+    perk_period,
     safe_date,
     safe_record_list,
     today_local,
@@ -147,6 +148,8 @@ class DeviceCompanionCalendar(CalendarEntity):
             if is_terminal_status(legacy_status(accessory)):
                 continue
             expiration = safe_date(accessory.get(CONF_EXPIRATION_DATE))
+            if self._kind == KIND_SERVICE:
+                _, expiration = perk_period(accessory, dict(self._entry.options))
             if expiration and self._in_window(expiration, view_start, view_end):
                 name = accessory.get("name", "附加项目")
                 events.append(
